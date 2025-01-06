@@ -1,0 +1,155 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader
+import logging
+import time
+from tqdm import tqdm
+from datetime import datetime
+import os
+
+
+from dataset import DrugResponseDataset, collate_fn
+from model import DrugResponseModel
+
+os.environ['TZ'] = 'Asia/Seoul'
+time.tzset()  # Unix 환경에서 적용
+
+# Configuration
+config = {
+    'device': torch.device("cuda:3" if torch.cuda.is_available() else "cpu"),
+    'batch_size': 2,
+    'learning_rate': 0.001,
+    'num_epochs': 1,
+    'checkpoint_dir': './checkpoints', # ckpt 디렉토리
+    'log_interval': 10, # batch 별 log 출력 간격
+    'save_interval': 1, # ckpt 저장할 epoch 간격
+}
+
+log_filename = f"log/train/{datetime.now().strftime('%Y%m%d_%H')}.log"
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(log_filename),
+        logging.StreamHandler()
+    ]
+)
+
+logging.info(f"CUDA is available: {torch.cuda.is_available()}")
+
+# 1. Data Loader
+train_data = torch.load('dataset/train_dataset.pt')
+train_dataset = DrugResponseDataset(
+    gene_embeddings=train_data['gene_embeddings'],
+    pathway_graphs=train_data['pathway_graphs'],
+    substructure_embeddings=train_data['substructure_embeddings'],
+    drug_graphs=train_data['drug_graphs'],
+    labels=train_data['labels'],
+    sample_indices=train_data['sample_indices'],
+)
+
+val_data = torch.load('dataset/val_dataset.pt')
+val_dataset = DrugResponseDataset(
+    gene_embeddings=val_data['gene_embeddings'],
+    pathway_graphs=val_data['pathway_graphs'],
+    substructure_embeddings=val_data['substructure_embeddings'],
+    drug_graphs=val_data['drug_graphs'],
+    labels=val_data['labels'],
+    sample_indices=val_data['sample_indices'],
+)
+
+train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=True, collate_fn=collate_fn)
+val_loader = DataLoader(val_dataset, batch_size=config['batch_size'], shuffle=False, collate_fn=collate_fn)
+
+
+# 2. Model Initialization
+model = DrugResponseModel()
+model = model.to(config['device'])
+criterion = nn.BCELoss()
+optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'])
+logging.info(f"Model initialized on device: {config['device']}")
+
+
+# 3. Helper Function
+def process_batch(batch, model, criterion, device):
+    gene_embeddings = batch['gene_embeddings'].to(device)
+    pathway_graphs = batch['pathway_graphs'].to(device)
+    substructure_embeddings = batch['substructure_embeddings'].to(device)
+    drug_graphs = batch['drug_graphs'].to(device)
+    labels = batch['labels'].to(device)
+
+    outputs = model(gene_embeddings, pathway_graphs, substructure_embeddings, drug_graphs)
+    loss = criterion(outputs.squeeze(), labels)
+
+    preds = (outputs.squeeze() > 0.5).long()
+    correct_preds = (preds == labels).sum().item()
+    total_samples = labels.size(0)
+
+    return loss, correct_preds, total_samples
+
+
+# 4. Training Loop
+train_losses, val_losses = [], []
+train_accuracies, val_accuracies = [], []
+
+for epoch in range(config['num_epochs']):
+    epoch_start = time.time()
+    logging.info(f"Epoch [{epoch+1}/{config['num_epochs']}] started.")
+
+    # Training Phase
+    model.train()
+    total_train_loss, correct_train_preds, total_train_samples = 0, 0, 0
+
+    for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Train Epoch {epoch+1}")):
+        optimizer.zero_grad()
+        loss, correct_preds, total_samples = process_batch(batch, model, criterion, config['device'])
+        loss.backward()
+        optimizer.step()
+
+        total_train_loss += loss.item()
+        correct_train_preds += correct_preds
+        total_train_samples += total_samples
+
+        if batch_idx % config['log_interval'] == 0:
+            logging.info(f"Batch {batch_idx+1}: Loss: {loss.item():.4f}")
+
+    train_loss = total_train_loss / len(train_loader)
+    train_accuracy = correct_train_preds / total_train_samples
+    train_losses.append(train_loss)
+    train_accuracies.append(train_accuracy)
+
+    # Validation Phase
+    model.eval()
+    total_val_loss, correct_val_preds, total_val_samples = 0, 0, 0
+
+    with torch.no_grad():
+        for batch in tqdm(val_loader, desc=f"Validation Epoch {epoch+1}"):
+            loss, correct_preds, total_samples = process_batch(batch, model, criterion, config['device'])
+            total_val_loss += loss.item()
+            correct_val_preds += correct_preds
+            total_val_samples += total_samples
+
+    val_loss = total_val_loss / len(val_loader)
+    val_accuracy = correct_val_preds / total_val_samples
+    val_losses.append(val_loss)
+    val_accuracies.append(val_accuracy)
+
+    logging.info(f"Epoch [{epoch+1}/{config['num_epochs']}] completed. "
+                 f"Train Loss: {train_loss:.4f}, Train Accuracy: {train_accuracy:.4f}, "
+                 f"Val Loss: {val_loss:.4f}, Val Accuracy: {val_accuracy:.4f}")
+
+    # Save Checkpoint
+    if (epoch + 1) % config['save_interval'] == 0:
+        checkpoint_path = f"{config['checkpoint_dir']}/ckpt_epoch_{epoch+1}.pth"
+        torch.save({
+            'epoch': epoch + 1,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'train_loss': train_loss,
+            'val_loss': val_loss,
+            'train_accuracy': train_accuracy,
+            'val_accuracy': val_accuracy
+        }, checkpoint_path)
+        logging.info(f"Model checkpoint saved: {checkpoint_path}")
