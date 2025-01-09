@@ -40,7 +40,7 @@ class DrugResponseDataset(Dataset):
         pathway_graph = self.pathway_graphs  # Pathway graphs
 
         # Substructure embeddings for pathways
-        substructure_embedding = self.substructure_embeddings[drug_id].repeat(len(pathway_graph), 1)  # [1, 170]
+        substructure_embedding = self.substructure_embeddings[drug_id]  # [1, 170]
         drug_graph = self.drug_graphs[drug_id]  # Drug graphs
 
         # Get the label for the cell line-drug pair

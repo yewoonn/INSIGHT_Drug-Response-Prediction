@@ -2,18 +2,22 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
+from torch.cuda.amp import GradScaler, autocast
+
 import logging
 import time
 from tqdm import tqdm
 from datetime import datetime
 import os
 
-
 from dataset import DrugResponseDataset, collate_fn
 from model import DrugResponseModel
+from utils import plot_statics, clear_cache
 
 os.environ['TZ'] = 'Asia/Seoul'
 time.tzset()  # Unix 환경에서 적용
+# os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:1024' # OR 512
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 
 # Configuration
 config = {
@@ -22,11 +26,27 @@ config = {
     'learning_rate': 0.001,
     'num_epochs': 1,
     'checkpoint_dir': './checkpoints', # ckpt 디렉토리
+    'plot_dir': './plots',
     'log_interval': 10, # batch 별 log 출력 간격
     'save_interval': 1, # ckpt 저장할 epoch 간격
 }
 
-log_filename = f"log/train/{datetime.now().strftime('%Y%m%d_%H')}.log"
+NUM_CELL_LINES = 1280
+NUM_PATHWAYS = 312
+NUM_GENES = 3848
+NUM_DRUGS = 78
+NUM_SUBSTRUCTURES = 194
+
+GENE_EMBEDDING_DIM = 32
+SUBSTRUCTURE_EMBEDDING_DIM = 32
+HIDDEN_DIM = 32
+FINAL_DIM = 16
+OUTPUT_DIM = 1
+
+BATCH_SIZE = config['batch_size']
+
+file_name = datetime.now().strftime('%Y%m%d_%H')
+log_filename = f"log/train/{file_name}.log"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -65,9 +85,25 @@ val_loader = DataLoader(val_dataset, batch_size=config['batch_size'], shuffle=Fa
 
 
 # 2. Model Initialization
-model = DrugResponseModel()
+model = DrugResponseModel(NUM_PATHWAYS, NUM_GENES, NUM_SUBSTRUCTURES, GENE_EMBEDDING_DIM, SUBSTRUCTURE_EMBEDDING_DIM, HIDDEN_DIM, FINAL_DIM, OUTPUT_DIM, BATCH_SIZE)
+logging.info(f"Initial GPU memory usage (before moving model to device): "
+             f"{torch.cuda.memory_allocated(config['device']) / 1e6:.2f} MB allocated, "
+             f"{torch.cuda.memory_reserved(config['device']) / 1e6:.2f} MB reserved.")
+
 model = model.to(config['device'])
-criterion = nn.BCELoss()
+
+# 모델 파라미터 개수 확인
+total_params = sum(p.numel() for p in model.parameters())
+trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+logging.info(f"Total model parameters: {total_params:,}")
+logging.info(f"Trainable model parameters: {trainable_params:,}")
+
+# GPU 메모리 사용량 출력
+logging.info(f"Initial GPU memory usage: {torch.cuda.memory_allocated(config['device']) / 1e6:.2f} MB allocated, "
+             f"{torch.cuda.memory_reserved(config['device']) / 1e6:.2f} MB reserved.")
+
+criterion = nn.BCEWithLogitsLoss()
 optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'])
 logging.info(f"Model initialized on device: {config['device']}")
 
@@ -80,19 +116,28 @@ def process_batch(batch, model, criterion, device):
     drug_graphs = batch['drug_graphs'].to(device)
     labels = batch['labels'].to(device)
 
-    outputs = model(gene_embeddings, pathway_graphs, substructure_embeddings, drug_graphs)
-    loss = criterion(outputs.squeeze(), labels)
+    print("gene_embeddings : ", gene_embeddings.shape)
+    print("pathway_graphs : ", pathway_graphs)
+    print("substructure_embeddings : ", substructure_embeddings.shape)
+    print("drug_graphs : ", drug_graphs)
+    print("labels : ", labels.shape)
 
-    preds = (outputs.squeeze() > 0.5).long()
+
+    with autocast():
+        outputs = model(gene_embeddings, pathway_graphs, substructure_embeddings, drug_graphs)
+        loss = criterion(outputs.squeeze(), labels)
+
+    preds = (torch.sigmoid(outputs.squeeze()) > 0.5).long() 
     correct_preds = (preds == labels).sum().item()
     total_samples = labels.size(0)
 
     return loss, correct_preds, total_samples
 
-
 # 4. Training Loop
 train_losses, val_losses = [], []
 train_accuracies, val_accuracies = [], []
+
+scaler = GradScaler()
 
 for epoch in range(config['num_epochs']):
     epoch_start = time.time()
@@ -104,16 +149,22 @@ for epoch in range(config['num_epochs']):
 
     for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Train Epoch {epoch+1}")):
         optimizer.zero_grad()
-        loss, correct_preds, total_samples = process_batch(batch, model, criterion, config['device'])
-        loss.backward()
-        optimizer.step()
+        
+        with autocast():
+            loss, correct_preds, total_samples = process_batch(batch, model, criterion, config['device'])
+
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
 
         total_train_loss += loss.item()
         correct_train_preds += correct_preds
         total_train_samples += total_samples
 
         if batch_idx % config['log_interval'] == 0:
-            logging.info(f"Batch {batch_idx+1}: Loss: {loss.item():.4f}")
+            logging.info(f"Batch {batch_idx+1}: Loss: {loss.item():.4f}, ")            
+
+        clear_cache()
 
     train_loss = total_train_loss / len(train_loader)
     train_accuracy = correct_train_preds / total_train_samples
@@ -125,11 +176,12 @@ for epoch in range(config['num_epochs']):
     total_val_loss, correct_val_preds, total_val_samples = 0, 0, 0
 
     with torch.no_grad():
-        for batch in tqdm(val_loader, desc=f"Validation Epoch {epoch+1}"):
-            loss, correct_preds, total_samples = process_batch(batch, model, criterion, config['device'])
-            total_val_loss += loss.item()
-            correct_val_preds += correct_preds
-            total_val_samples += total_samples
+        with autocast():
+            for batch in tqdm(val_loader, desc=f"Validation Epoch {epoch+1}"):
+                loss, correct_preds, total_samples = process_batch(batch, model, criterion, config['device'])
+                total_val_loss += loss.item()
+                correct_val_preds += correct_preds
+                total_val_samples += total_samples
 
     val_loss = total_val_loss / len(val_loader)
     val_accuracy = correct_val_preds / total_val_samples
@@ -153,3 +205,8 @@ for epoch in range(config['num_epochs']):
             'val_accuracy': val_accuracy
         }, checkpoint_path)
         logging.info(f"Model checkpoint saved: {checkpoint_path}")
+
+
+epoch_nums =  config['num_epochs'] + 1
+plot_statics(file_name, epoch_nums, train_losses, val_losses, train_accuracies, val_accuracies)
+logging.info(f"Plots saved in directory Plots.")

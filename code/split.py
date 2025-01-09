@@ -18,31 +18,33 @@ def filter_data(sample_indices, gene_embeddings, drug_graphs, substructure_embed
 # =================================================================================================
 
 num_cell_lines = 1280
-num_pathways = 314
+num_pathways = 312
 num_genes = 3848
 num_drugs = 78
 num_substructures = 194
 
-gene_embeddings = torch.load('../0. input/0_gene_embeddings.pt')
-pathway_graph_list = torch.load('../0. input/0_pathway_graph.pt')
+gene_embeddings = torch.load('./input/0_gene_embeddings.pt')
+pathway_graph_list = torch.load('./input/0_pathway_graph.pt')
 
-saved_embeddings = np.load('../0. input/0_drug_embeddings.npz')
+saved_embeddings = np.load('./input/0_drug_embeddings.npz')
 substructure_embeddings = {
     key: torch.tensor(saved_embeddings[key], dtype=torch.float32)
     for key in saved_embeddings.keys()
 }
 saved_embeddings.close()
-drug_graph_dict = torch.load('../0. input/0_drug_graph_dict.pt')
+drug_graph_dict = torch.load('./input/0_drug_graph_dict.pt')
 
-labels_dict = torch.load('../0. input/0_drug_label_dict.pt')
+labels_dict = torch.load('./input/0_drug_label_dict.pt')
 
 cell_lines = list(gene_embeddings.keys())
 drugs = list(substructure_embeddings.keys())
 sample_indices = list(product(cell_lines, drugs)) 
 
+print("cell_lines : ", len(cell_lines), "drugs : ", len(drugs))
+
 # 데이터셋 분할 비율 (0.7, 0.15, 0.15)
-train_ratio = 0.7
-val_ratio = 0.15
+train_ratio = 0.8
+val_ratio = 0.1
 
 # Sample indices 분할
 train_indices, temp_indices = train_test_split(sample_indices, test_size=(1 - train_ratio), random_state=42)
