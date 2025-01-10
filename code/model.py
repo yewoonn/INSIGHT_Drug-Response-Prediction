@@ -144,7 +144,6 @@ class DrugGraphEmbedding(nn.Module):
         
         return graph_embedding
 
-
 #  [4] DRUG RESPONSE MODEL
 class DrugResponseModel(nn.Module):
     def __init__(self, num_pathways, num_genes, num_substructures, gene_dim, substructure_dim, hidden_dim, final_dim, output_dim, batch_size):
@@ -163,11 +162,15 @@ class DrugResponseModel(nn.Module):
 
     def forward(self, gene_embeddings, pathway_graphs, substructure_embeddings, drug_graphs):
         # Gene and Substructure Embeddings
+        print("gene embeddings : ", gene_embeddings.shape)
+        print("substructure embeddings : ", substructure_embeddings.shape)
+
         substructure_embeddings = substructure_embeddings.int()  
         gene_embeddings = self.gene_embedding_layer(gene_embeddings)  # [Batch, Pathway, Gene, Embedding_dim]
         substructure_embeddings = self.substructure_embedding_layer(substructure_embeddings)  # [Batch, Substructure, Embedding_dim]
 
         pathway_graph_embeddings = []
+        drug_embeddings = []
 
         # Pathway Cross Attention & Graph Embedding
         for i in range(len(pathway_graphs)):
@@ -182,19 +185,24 @@ class DrugResponseModel(nn.Module):
                 filtered_gene_embeddings,  # [Batch, Num_Valid_Genes, Embedding_dim]
                 substructure_embeddings  # [Batch, Num_Substructures, Embedding_dim]
             )  # [Batch, Num_Valid_Genes, Embedding_dim]
-        
+
+            sub_attention_out = self.Sub2Gene_cross_attention(
+                substructure_embeddings, # [Batch, Num_Substructures, Embedding_dim]
+                filtered_gene_embeddings # [Batch, Num_Valid_Genes, Embedding_dim]
+            )
+
+            # Pathway Graph Embedding
             graph_embedding = self.pathway_graph(gene_attention_out, pathway_graph)
+
             pathway_graph_embeddings.append(graph_embedding)
+            drug_embeddings.append(sub_attention_out)
+        
         pathway_graph_embedding = torch.stack(pathway_graph_embeddings, dim=1) # [Batch, Num_Pathways, Embedding_dim]]
+        drug_embeddings = torch.stack(drug_embeddings, dim = 1)
 
-
-        # Drug Cross Attention & Graph Embedding
-        gene_embeddings_mean = torch.mean(gene_embeddings, dim=1)
-        sub_attention_out = self.Sub2Gene_cross_attention(
-            substructure_embeddings,
-            gene_embeddings_mean
-        )
-        drug_graph_embedding = self.drug_graph(drug_graphs, sub_attention_out)  # [Batch, hidden_dim]
+        # Drug Graph Embedding
+        drug_embeddings = torch.mean(drug_embeddings, dim = 1)
+        drug_graph_embedding = self.drug_graph(drug_graphs, drug_embeddings)  # [Batch, hidden_dim]
 
         # Final Embedding
         final_pathway_embedding = torch.mean(pathway_graph_embedding, dim=1)  # [Batch, Embedding_dim]

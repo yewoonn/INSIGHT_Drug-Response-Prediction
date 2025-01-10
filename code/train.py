@@ -21,7 +21,7 @@ os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 
 # Configuration
 config = {
-    'device': torch.device("cuda:3" if torch.cuda.is_available() else "cpu"),
+    'device': torch.device("cuda:0" if torch.cuda.is_available() else "cpu"),
     'batch_size': 2,
     'learning_rate': 0.001,
     'num_epochs': 1,
@@ -115,13 +115,6 @@ def process_batch(batch, model, criterion, device):
     substructure_embeddings = batch['substructure_embeddings'].to(device)
     drug_graphs = batch['drug_graphs'].to(device)
     labels = batch['labels'].to(device)
-
-    print("gene_embeddings : ", gene_embeddings.shape)
-    print("pathway_graphs : ", pathway_graphs)
-    print("substructure_embeddings : ", substructure_embeddings.shape)
-    print("drug_graphs : ", drug_graphs)
-    print("labels : ", labels.shape)
-
 
     with autocast():
         outputs = model(gene_embeddings, pathway_graphs, substructure_embeddings, drug_graphs)
