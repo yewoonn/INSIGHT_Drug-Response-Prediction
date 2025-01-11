@@ -7,6 +7,8 @@ from itertools import product
 import numpy as np
 from torch_geometric.data import Data, Batch
 from torch_geometric.nn import GCNConv, global_mean_pool
+import math
+from DiffTransformer.rms_norm import RMSNorm
 
 
 #  [1] EMBEDDING LAYERS
@@ -60,6 +62,69 @@ class CrossAttention(nn.Module):
         return attended_embeddings
     
 
+class DifferCrossAttn(nn.Module):
+    def __init__(self, embed_dim: int, depth: int = 0):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.head_dim = embed_dim // 2
+        self.scaling = self.head_dim ** -0.5
+
+        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=False)  # (E -> E)
+        self.k_proj = nn.Linear(embed_dim, embed_dim, bias=False)  # (E -> E)
+        self.v_proj = nn.Linear(embed_dim, embed_dim, bias=False)  # (E -> E)
+        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=False)
+
+        self.lambda_init = 0.8 - 0.6 * math.exp(-0.3 * depth)
+
+        self.lambda_q1 = nn.Parameter(torch.zeros(self.head_dim).normal_(mean=0, std=0.1))
+        self.lambda_k1 = nn.Parameter(torch.zeros(self.head_dim).normal_(mean=0, std=0.1))
+        self.lambda_q2 = nn.Parameter(torch.zeros(self.head_dim).normal_(mean=0, std=0.1))
+        self.lambda_k2 = nn.Parameter(torch.zeros(self.head_dim).normal_(mean=0, std=0.1))
+
+        self.subln = RMSNorm(2 * self.head_dim, eps=1e-5, elementwise_affine=True)
+
+    def forward(self, gene: torch.Tensor, substructure: torch.Tensor) -> torch.Tensor:
+        bsz, n_gene, _ = gene.size()
+        _, n_sub,  _ = substructure.size()
+
+        # 1) Q, K, V 구하기 (Cross Attention)
+        q = self.q_proj(gene)              # (B, n_gene, E)
+        k = self.k_proj(substructure)      # (B, n_sub,  E)
+        v = self.v_proj(substructure)      # (B, n_sub,  E)
+
+        # 2) Q, K -> [2, head_dim], V -> [2 * head_dim]
+        q = q.view(bsz, n_gene, 2, self.head_dim)   # (B, n_gene, 2, head_dim)
+        k = k.view(bsz, n_sub,  2, self.head_dim)   # (B, n_sub,  2, head_dim)
+        v = v.view(bsz, n_sub,  2 * self.head_dim)  # (B, n_sub,  2 * head_dim)
+
+        # 3) matmul 위해 transpose (slot 차원을 두 번째로)
+        q = q.transpose(1, 2)  # (B, 2, n_gene, head_dim)
+        k = k.transpose(1, 2)  # (B, 2, n_sub,  head_dim)
+        v = v.unsqueeze(1)     # (B, 1, n_sub, 2*head_dim)
+
+        q = q * self.scaling
+
+        # 4) attention score = Q @ K^T
+        #    => (B, 2, n_gene, head_dim) x (B, 2, head_dim, n_sub) = (B, 2, n_gene, n_sub)
+        attn_weights = torch.matmul(q, k.transpose(-1, -2))  # (B, 2, n_gene, n_sub)
+        attn_weights = F.softmax(attn_weights, dim=-1)  # (B, 2, n_gene, n_sub)
+
+        lambda_1 = torch.exp(torch.sum(self.lambda_q1 * self.lambda_k1, dim=-1))
+        lambda_2 = torch.exp(torch.sum(self.lambda_q2 * self.lambda_k2, dim=-1))
+        lambda_full = lambda_1 - lambda_2 + self.lambda_init
+
+        # 5) 두 슬롯(0, 1) 간 차이를 내어 최종 attn_weights 계산
+        diff_attn = attn_weights[:, 0] - lambda_full * attn_weights[:, 1]  # (B, n_gene, n_sub)
+        diff_attn = diff_attn.unsqueeze(1)  # (B, 1, n_gene, n_sub)
+
+        attn_output = torch.matmul(diff_attn, v)
+        attn_output = self.subln(attn_output)               # (B, 1, n_gene, 2*head_dim)
+        attn_output = attn_output * (1.0 - self.lambda_init)
+        attn_output = attn_output.squeeze(1)                # (B, n_gene, 2*head_dim)
+        out = self.out_proj(attn_output)                    # (B, n_gene, E)
+
+        return out
+    
 #  [3] GRAPH EMBEDDING
 class PathwayGraphEmbedding(nn.Module):
     def __init__(self, batch_size, input_dim, hidden_dim):
@@ -77,7 +142,8 @@ class PathwayGraphEmbedding(nn.Module):
             graph_embeddings: Tensor of shape [BATCH_SIZE, NUM_PATHWAYS, EMBEDDING_DIM]
         """
         # Repeat the graph `batch_size` times
-        repeated_graphs = [pathway_graph.clone() for _ in range(self.batch_size)]
+        current_batch_size = gene_emb.size(0) # 마지막 배치 유지할 때 수정됨
+        repeated_graphs = [pathway_graph.clone() for _ in range(current_batch_size)] # 마지막 배치 유지할 때 수정됨
         batched_graph = Batch.from_data_list(repeated_graphs)
         expected_nodes = batched_graph.x.size(0)
 
