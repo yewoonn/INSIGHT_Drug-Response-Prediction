@@ -54,3 +54,19 @@ def plot_statics(file_name, train_losses, val_losses, train_accuracies, val_accu
         os.path.join(plot_dir, "accuracy.png")
     )
     
+def save_attention_weights(file_name, epoch, pathway_idx, gene_attention_weights, sub_attention_weights, sample_indices):
+    attn_dir = f"weights/{file_name}/epoch_{epoch}"
+    os.makedirs(attn_dir, exist_ok=True)
+
+    file_path = f"{attn_dir}/pathway_{pathway_idx}.pt"
+    if os.path.exists(file_path):
+        saved_dict = torch.load(file_path)
+    else:
+        saved_dict = {}
+    
+    for b_idx, (cell_line_id, drug_id) in enumerate(sample_indices):
+        saved_dict[(cell_line_id, drug_id)] = {
+        "gene2sub": gene_attention_weights[b_idx].detach().cpu(),
+        "sub2gene": sub_attention_weights[b_idx].detach().cpu()
+    }
+    torch.save(saved_dict, file_path)

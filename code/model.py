@@ -8,8 +8,10 @@ import numpy as np
 from torch_geometric.data import Data, Batch
 from torch_geometric.nn import GCNConv, global_mean_pool
 import math
-from DiffTransformer.rms_norm import RMSNorm
+import os
 
+from DiffTransformer.rms_norm import RMSNorm
+from utils import save_attention_weights
 
 #  [1] EMBEDDING LAYERS
 class GeneEmbeddingLayer(nn.Module):
@@ -59,7 +61,7 @@ class CrossAttention(nn.Module):
         # Apply Attention
         attended_embeddings = torch.matmul(attention_weights, value)  
         
-        return attended_embeddings
+        return attended_embeddings, attention_weights
     
 
 class DifferCrossAttn(nn.Module):
@@ -123,8 +125,9 @@ class DifferCrossAttn(nn.Module):
         attn_output = attn_output.squeeze(1)                # (B, n_gene, 2*head_dim)
         out = self.out_proj(attn_output)                    # (B, n_gene, E)
 
-        return out
+        return out, diff_attn
     
+
 #  [3] GRAPH EMBEDDING
 class PathwayGraphEmbedding(nn.Module):
     def __init__(self, batch_size, input_dim, hidden_dim):
@@ -142,8 +145,8 @@ class PathwayGraphEmbedding(nn.Module):
             graph_embeddings: Tensor of shape [BATCH_SIZE, NUM_PATHWAYS, EMBEDDING_DIM]
         """
         # Repeat the graph `batch_size` times
-        current_batch_size = gene_emb.size(0) # 마지막 배치 유지할 때 수정됨
-        repeated_graphs = [pathway_graph.clone() for _ in range(current_batch_size)] # 마지막 배치 유지할 때 수정됨
+        current_batch_size = gene_emb.size(0) 
+        repeated_graphs = [pathway_graph.clone() for _ in range(current_batch_size)] 
         batched_graph = Batch.from_data_list(repeated_graphs)
         expected_nodes = batched_graph.x.size(0)
 
@@ -152,7 +155,8 @@ class PathwayGraphEmbedding(nn.Module):
         node_features = gene_emb.view(-1, gene_emb.size(-1))  # Shape: [BATCH_SIZE * NUM_VALID_NODES, 128]
         assert node_features.size(0) == expected_nodes, \
             f"Node feature count mismatch: {node_features.size(0)} != {expected_nodes}"
-        batched_graph.x = node_features  # Assign to graph
+        
+        batched_graph.x = node_features  # Assign to graph 
 
         # GCN layers
         x = F.relu(self.conv1(batched_graph.x, batched_graph.edge_index))
@@ -210,15 +214,25 @@ class DrugGraphEmbedding(nn.Module):
         
         return graph_embedding
 
+
 #  [4] DRUG RESPONSE MODEL
 class DrugResponseModel(nn.Module):
-    def __init__(self, num_pathways, num_genes, num_substructures, gene_dim, substructure_dim, hidden_dim, final_dim, output_dim, batch_size):
+    def __init__(self, num_pathways, num_genes, num_substructures, gene_dim, substructure_dim, hidden_dim, final_dim, output_dim, batch_size, is_differ, depth, save_intervals, save_pathways, file_name):
         super(DrugResponseModel, self).__init__()
+        self.save_intervals = save_intervals
+        self.save_pathways = save_pathways
+        self.file_name = file_name
+
         self.gene_embedding_layer = GeneEmbeddingLayer(num_pathways, num_genes, gene_dim)
         self.substructure_embedding_layer = SubstructureEmbeddingLayer(num_substructures, substructure_dim)
         
-        self.Gene2Sub_cross_attention = CrossAttention(query_dim=gene_dim, key_dim=substructure_dim)
-        self.Sub2Gene_cross_attention = CrossAttention(query_dim=substructure_dim, key_dim=gene_dim)
+        if(is_differ):
+            self.Gene2Sub_cross_attention = DifferCrossAttn(gene_dim, depth)
+            self.Sub2Gene_cross_attention = DifferCrossAttn(substructure_dim, depth)
+
+        else:
+            self.Gene2Sub_cross_attention = CrossAttention(gene_dim, substructure_dim)
+            self.Sub2Gene_cross_attention = CrossAttention(substructure_dim, gene_dim)
 
         self.pathway_graph = PathwayGraphEmbedding(batch_size ,gene_dim, hidden_dim)
         self.drug_graph = DrugGraphEmbedding(substructure_dim, hidden_dim)
@@ -226,11 +240,8 @@ class DrugResponseModel(nn.Module):
         self.fc1 = nn.Linear(gene_dim + hidden_dim, final_dim)
         self.fc2 = nn.Linear(final_dim, output_dim)
 
-    def forward(self, gene_embeddings, pathway_graphs, substructure_embeddings, drug_graphs):
+    def forward(self, gene_embeddings, pathway_graphs, substructure_embeddings, drug_graphs, epoch, sample_indices):
         # Gene and Substructure Embeddings
-        print("gene embeddings : ", gene_embeddings.shape)
-        print("substructure embeddings : ", substructure_embeddings.shape)
-
         substructure_embeddings = substructure_embeddings.int()  
         gene_embeddings = self.gene_embedding_layer(gene_embeddings)  # [Batch, Pathway, Gene, Embedding_dim]
         substructure_embeddings = self.substructure_embedding_layer(substructure_embeddings)  # [Batch, Substructure, Embedding_dim]
@@ -247,28 +258,36 @@ class DrugResponseModel(nn.Module):
             filtered_gene_embeddings = gene_embeddings[:, i, valid_gene_indices, :]  # [Batch, Num_Valid_Genes, Embedding_dim]
 
             # Cross Attention
-            gene_attention_out = self.Gene2Sub_cross_attention(
+            gene_attention_out, gene_attention_weights = self.Gene2Sub_cross_attention(
                 filtered_gene_embeddings,  # [Batch, Num_Valid_Genes, Embedding_dim]
-                substructure_embeddings  # [Batch, Num_Substructures, Embedding_dim]
-            )  # [Batch, Num_Valid_Genes, Embedding_dim]
+                substructure_embeddings    # [Batch, Num_Substructures, Embedding_dim]
+            ) # [Batch, Num_Valid_Genes, Embedding_dim]
 
-            sub_attention_out = self.Sub2Gene_cross_attention(
-                substructure_embeddings, # [Batch, Num_Substructures, Embedding_dim]
-                filtered_gene_embeddings # [Batch, Num_Valid_Genes, Embedding_dim]
+            sub_attention_out, sub_attention_weights = self.Sub2Gene_cross_attention(
+                substructure_embeddings,   # [Batch, Num_Substructures, Embedding_dim]
+                filtered_gene_embeddings   # [Batch, Num_Valid_Genes, Embedding_dim]
             )
 
+            if (epoch is not None) and (epoch % self.save_intervals == 0) and (i in self.save_pathways):
+                save_attention_weights(self.file_name, epoch, i, gene_attention_weights, sub_attention_weights, sample_indices)
+
             # Pathway Graph Embedding
-            graph_embedding = self.pathway_graph(gene_attention_out, pathway_graph)
+            graph_embedding = self.pathway_graph(
+                gene_attention_out,  
+                pathway_graph       
+            )
 
             pathway_graph_embeddings.append(graph_embedding)
             drug_embeddings.append(sub_attention_out)
         
         pathway_graph_embedding = torch.stack(pathway_graph_embeddings, dim=1) # [Batch, Num_Pathways, Embedding_dim]]
-        drug_embeddings = torch.stack(drug_embeddings, dim = 1)
+        drug_embeddings = torch.mean(torch.stack(drug_embeddings, dim=1), dim=1)
 
         # Drug Graph Embedding
-        drug_embeddings = torch.mean(drug_embeddings, dim = 1)
-        drug_graph_embedding = self.drug_graph(drug_graphs, drug_embeddings)  # [Batch, hidden_dim]
+        drug_graph_embedding = self.drug_graph(
+            drug_graphs,     
+            drug_embeddings  
+        ) # [Batch, hidden_dim]
 
         # Final Embedding
         final_pathway_embedding = torch.mean(pathway_graph_embedding, dim=1)  # [Batch, Embedding_dim]

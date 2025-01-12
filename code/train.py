@@ -22,15 +22,16 @@ os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 # Configuration
 config = {
     'device': torch.device("cuda:3" if torch.cuda.is_available() else "cpu"),
-    'batch_size': 2,
-    'is_differ' : True,
+    'batch_size': 3,
+    'is_differ' : False,
     'depth' : 2,
     'learning_rate': 0.001,
-    'num_epochs': 10,
+    'num_epochs': 4,
     'checkpoint_dir': './checkpoints', # ckpt 디렉토리
     'plot_dir': './plots',
     'log_interval': 10, # batch 별 log 출력 간격
     'save_interval': 1, # ckpt 저장할 epoch 간격
+    'save_pathways' : [1, 2, 4]
 }
 
 NUM_CELL_LINES = 1280
@@ -49,10 +50,12 @@ BATCH_SIZE = config['batch_size']
 IS_DIFFER = config['is_differ']
 DEPTH = config['depth']
 
-file_name = datetime.now().strftime('%Y%m%d_%H')
-log_filename = f"log/train/{file_name}.log"
+FILE_NAME = datetime.now().strftime('%Y%m%d_%H')
+SAVE_INTERVALS = config['save_interval']
+SAVE_PATHWAYS = config['save_pathways']
 
-chpt_dir = f"{config['checkpoint_dir']}/{file_name}"
+log_filename = f"log/train/{FILE_NAME}.log"
+chpt_dir = f"{config['checkpoint_dir']}/{FILE_NAME}"
 os.makedirs(chpt_dir, exist_ok=True)
 
 logging.basicConfig(
@@ -63,8 +66,6 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-
-logging.info(f"CUDA is available: {torch.cuda.is_available()}")
 
 logging.info(
     "Model Configuration and Parameters: "
@@ -96,6 +97,8 @@ logging.info(
     f"  Save Interval: {config['save_interval']}"
 )
 
+logging.info(f"CUDA is available: {torch.cuda.is_available()}")
+
 # 1. Data Loader
 train_data = torch.load('dataset/train_dataset.pt')
 train_dataset = DrugResponseDataset(
@@ -120,9 +123,8 @@ val_dataset = DrugResponseDataset(
 train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=True, collate_fn=collate_fn)
 val_loader = DataLoader(val_dataset, batch_size=config['batch_size'], shuffle=False, collate_fn=collate_fn)
 
-
 # 2. Model Initialization
-model = DrugResponseModel(NUM_PATHWAYS, NUM_GENES, NUM_SUBSTRUCTURES, GENE_EMBEDDING_DIM, SUBSTRUCTURE_EMBEDDING_DIM, HIDDEN_DIM, FINAL_DIM, OUTPUT_DIM, BATCH_SIZE, IS_DIFFER, DEPTH)
+model = DrugResponseModel(NUM_PATHWAYS, NUM_GENES, NUM_SUBSTRUCTURES, GENE_EMBEDDING_DIM, SUBSTRUCTURE_EMBEDDING_DIM, HIDDEN_DIM, FINAL_DIM, OUTPUT_DIM, BATCH_SIZE, IS_DIFFER, DEPTH, SAVE_INTERVALS, SAVE_PATHWAYS,FILE_NAME)
 logging.info(f"Initial GPU memory usage (before moving model to device): "
              f"{torch.cuda.memory_allocated(config['device']) / 1e6:.2f} MB allocated, "
              f"{torch.cuda.memory_reserved(config['device']) / 1e6:.2f} MB reserved.")
@@ -146,15 +148,18 @@ logging.info(f"Model initialized on device: {config['device']}")
 
 
 # 3. Helper Function
-def process_batch(batch, model, criterion, device):
+def process_batch(batch, epoch, model, criterion, device):
     gene_embeddings = batch['gene_embeddings'].to(device)
     pathway_graphs = batch['pathway_graphs'].to(device)
     substructure_embeddings = batch['substructure_embeddings'].to(device)
     drug_graphs = batch['drug_graphs'].to(device)
     labels = batch['labels'].to(device)
+    sample_indices = batch['sample_indices']  # [(cell_line_id, drug_id), ...] 추가
+    
+    # logging.info(f"Epoch {epoch}, Batch {batch_idx}, Sample Indices: {sample_indices}") # 추가
 
     with autocast(device_type="cuda" if config['device'].type == "cuda" else "cpu"):
-        outputs = model(gene_embeddings, pathway_graphs, substructure_embeddings, drug_graphs)
+        outputs = model(gene_embeddings, pathway_graphs, substructure_embeddings, drug_graphs, epoch, sample_indices)
         outputs = outputs.squeeze(dim=-1) 
         loss = criterion(outputs, labels) 
 
@@ -182,7 +187,7 @@ for epoch in range(config['num_epochs']):
         optimizer.zero_grad()
         
         with autocast(device_type="cuda" if config['device'].type == "cuda" else "cpu"):
-            loss, correct_preds, total_samples = process_batch(batch, model, criterion, config['device'])
+            loss, correct_preds, total_samples = process_batch(batch, epoch+1, model, criterion, config['device'])
 
         scaler.scale(loss).backward()
         scaler.step(optimizer)
@@ -209,7 +214,7 @@ for epoch in range(config['num_epochs']):
     with torch.no_grad():
         with autocast(device_type="cuda" if config['device'].type == "cuda" else "cpu"):
             for batch in tqdm(val_loader, desc=f"Validation Epoch {epoch+1}"):
-                loss, correct_preds, total_samples = process_batch(batch, model, criterion, config['device'])
+                loss, correct_preds, total_samples = process_batch(batch, epoch+1, model, criterion, config['device'])
                 total_val_loss += loss.item()
                 correct_val_preds += correct_preds
                 total_val_samples += total_samples
@@ -224,7 +229,7 @@ for epoch in range(config['num_epochs']):
                  f"Val Loss: {val_loss:.4f}, Val Accuracy: {val_accuracy:.4f}")
 
     # Save Checkpoint
-    if (epoch + 1) % config['save_interval'] == 0:
+    if (epoch + 1) % SAVE_INTERVALS == 0:
         checkpoint_path = f"{chpt_dir}/ckpt_epoch_{epoch+1}.pth" # 체크 포인트 수정됨
         torch.save({
             'epoch': epoch + 1,
@@ -237,8 +242,7 @@ for epoch in range(config['num_epochs']):
         }, checkpoint_path)
         logging.info(f"Model checkpoint saved: {checkpoint_path}")
 
-    plot_statics(file_name, train_losses, val_losses, train_accuracies, val_accuracies) # 추가
+    plot_statics(FILE_NAME, train_losses, val_losses, train_accuracies, val_accuracies) 
 
-
-plot_statics(file_name, train_losses, val_losses, train_accuracies, val_accuracies)
+plot_statics(FILE_NAME, train_losses, val_losses, train_accuracies, val_accuracies)
 logging.info(f"Plots saved in directory Plots.")

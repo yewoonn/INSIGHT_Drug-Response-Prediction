@@ -51,7 +51,8 @@ class DrugResponseDataset(Dataset):
             'pathway_graph': pathway_graph,                     # List of PyTorch Geometric Data objects
             'substructure_embedding': substructure_embedding,  # [245, 170]
             'drug_graph': drug_graph,  # PyTorch Geometric Data object
-            'label': label  # Scalar
+            'label': label,  # Scalar
+            'sample_index': (cell_line_id, drug_id) 
         }
 
 #  [2] COLLATE FUNCTION
@@ -60,12 +61,16 @@ def collate_fn(batch):
     substructure_embeddings = []
     drug_graphs = []
     labels = []
+    sample_indices = [] 
+
     
     for item in batch:
         gene_embeddings.append(item['gene_embedding'])
         substructure_embeddings.append(item['substructure_embedding'])
         drug_graphs.append(item['drug_graph'])
         labels.append(item['label'])
+        sample_indices.append(item['sample_index']) 
+
 
     pathway_graph = batch[0]['pathway_graph'] 
     pathway_batch = Batch.from_data_list(pathway_graph)
@@ -76,5 +81,6 @@ def collate_fn(batch):
         'pathway_graphs': pathway_batch,  
         'substructure_embeddings': torch.stack(substructure_embeddings),  # [batch_size, num_pathways, num_substructures]
         'drug_graphs': drug_batch, # PyTorch Geometric Batch
-        'labels': torch.tensor(labels, dtype=torch.float32)  # [batch_size]
+        'labels': torch.tensor(labels, dtype=torch.float32),  # [batch_size]
+        'sample_indices': sample_indices 
     }
