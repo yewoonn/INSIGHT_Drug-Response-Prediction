@@ -72,7 +72,7 @@ def collate_fn(batch):
 
     return {
         'gene_embeddings': torch.stack(gene_embeddings),  # [batch_size, num_pathways, num_genes]
-        'substructure_embeddings': torch.stack(drug_embeddings),  # [batch_size, num_substructures]
+        'drug_embeddings': torch.stack(drug_embeddings),  # [batch_size, num_substructures]
         'drug_graphs': drug_batch, # PyTorch Geometric Batch
         'labels': torch.tensor(labels, dtype=torch.float32),  # [batch_size]
         'sample_indices': sample_indices # 추가

@@ -17,12 +17,6 @@ def filter_data(sample_indices, gene_embeddings, drug_graphs, substructure_embed
 
 # =================================================================================================
 
-num_cell_lines = 1280
-num_pathways = 312
-num_genes = 3848
-num_drugs = 78
-num_substructures = 194
-
 # Gene Embedding
 gene_embeddings = torch.load('../input/0_gene_embeddings.pt')
 
@@ -34,8 +28,8 @@ torch.save(global_ids_dict, "./pathway_genes_dict.pt")
 
 # Drug Embedding
 saved_embeddings = np.load('../input/0_drug_embeddings.npz')
-substructure_embeddings = {
-    key: torch.tensor(saved_embeddings[key], dtype=torch.Int)
+drug_embeddings = {
+    key: torch.tensor(saved_embeddings[key], dtype=torch.int64)
     for key in saved_embeddings.keys()
 }
 saved_embeddings.close()
@@ -45,7 +39,7 @@ drug_graph_dict = torch.load('../input/0_drug_graph_dict.pt')
 labels_dict = torch.load('../input/0_drug_label_dict.pt')
 
 cell_lines = list(gene_embeddings.keys())
-drugs = list(substructure_embeddings.keys())
+drugs = list(drug_embeddings.keys())
 sample_indices = list(product(cell_lines, drugs)) 
 
 print("cell_lines : ", len(cell_lines), "drugs : ", len(drugs))
@@ -59,22 +53,22 @@ train_indices, temp_indices = train_test_split(sample_indices, test_size=(1 - tr
 val_indices, test_indices = train_test_split(temp_indices, test_size=(1 - val_ratio / (1 - train_ratio)), random_state=42)
 
 # 필터링
-train_gene_embeddings, train_drug_graphs, train_substructure_embeddings, train_labels = filter_data(
-    train_indices, gene_embeddings, drug_graph_dict, substructure_embeddings, labels_dict
+train_gene_embeddings, train_drug_graphs, train_drug_embeddings, train_labels = filter_data(
+    train_indices, gene_embeddings, drug_graph_dict, drug_embeddings, labels_dict
 )
 
-val_gene_embeddings, val_drug_graphs, val_substructure_embeddings, val_labels = filter_data(
-    val_indices, gene_embeddings, drug_graph_dict, substructure_embeddings, labels_dict
+val_gene_embeddings, val_drug_graphs, val_drug_embeddings, val_labels = filter_data(
+    val_indices, gene_embeddings, drug_graph_dict, drug_embeddings, labels_dict
 )
 
-test_gene_embeddings, test_drug_graphs, test_substructure_embeddings, test_labels = filter_data(
-    test_indices, gene_embeddings, drug_graph_dict, substructure_embeddings, labels_dict
+test_gene_embeddings, test_drug_graphs, test_drug_embeddings, test_labels = filter_data(
+    test_indices, gene_embeddings, drug_graph_dict, drug_embeddings, labels_dict
 )
 
 # Save train data
 torch.save({
     'gene_embeddings': train_gene_embeddings,
-    'substructure_embeddings': train_substructure_embeddings,
+    'drug_embeddings': train_drug_embeddings,
     'drug_graphs': train_drug_graphs,
     'labels': train_labels,
     'sample_indices': train_indices,
@@ -83,7 +77,7 @@ torch.save({
 # Save validation data
 torch.save({
     'gene_embeddings': val_gene_embeddings,
-    'substructure_embeddings': val_substructure_embeddings,
+    'drug_embeddings': val_drug_embeddings,
     'drug_graphs': val_drug_graphs,
     'labels': val_labels,
     'sample_indices': val_indices,
@@ -92,7 +86,7 @@ torch.save({
 # Save test data
 torch.save({
     'gene_embeddings': test_gene_embeddings,
-    'substructure_embeddings': test_substructure_embeddings,
+    'drug_embeddings': test_drug_embeddings,
     'drug_graphs': test_drug_graphs,
     'labels': test_labels,
     'sample_indices': test_indices,

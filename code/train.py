@@ -57,8 +57,6 @@ SAVE_INTERVALS = config['save_interval']
 SAVE_PATHWAYS = config['save_pathways']
 log_filename = f"log/train/{FILE_NAME}.log"
 
-
-
 chpt_dir = f"{config['checkpoint_dir']}/{FILE_NAME}"
 os.makedirs(chpt_dir, exist_ok=True)
 
@@ -153,21 +151,22 @@ logging.info(f"Model initialized on device: {config['device']}")
 # 3. Helper Function
 def process_batch(batch, epoch, model, criterion, device):
     gene_embeddings = batch['gene_embeddings'].to(device)
-    substructure_embeddings = batch['substructure_embeddings'].to(device)
+    drug_embeddings = batch['drug_embeddings'].to(device)
     drug_graphs = batch['drug_graphs'].to(device)
     labels = batch['labels'].to(device)
-    sample_indices = batch['sample_indices']  # [(cell_line_id, drug_id), ...] 추가
+    sample_indices = batch['sample_indices'] 
     
     with autocast(device_type="cuda" if config['device'].type == "cuda" else "cpu"):
-        outputs = model(gene_embeddings, substructure_embeddings, drug_graphs, epoch, sample_indices)
+        outputs = model(gene_embeddings, drug_embeddings, drug_graphs, epoch, sample_indices)
         outputs = outputs.squeeze(dim=-1) 
         loss = criterion(outputs, labels) 
 
     preds = (torch.sigmoid(outputs) > 0.5).long() 
     correct_preds = (preds == labels).sum().item()
     total_samples = labels.size(0)
+    incorrect_indices = [idx for idx, (pred, label) in enumerate(zip(preds, labels)) if pred != label]
 
-    return loss, correct_preds, total_samples, outputs
+    return loss, correct_preds, total_samples, outputs, incorrect_indices
 
 # 4. Training Loop
 train_losses, val_losses = [], []
@@ -186,17 +185,19 @@ for epoch in range(config['num_epochs']):
     model.train()
     total_train_loss, correct_train_preds, total_train_samples = 0, 0, 0
     y_true_train, y_pred_train = [], []
-    
+    incorrect_train_samples = [] 
 
     for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Train Epoch {epoch+1}")):
         optimizer.zero_grad()
         
         with autocast(device_type="cuda" if config['device'].type == "cuda" else "cpu"):
-            loss, correct_preds, total_samples, outputs = process_batch(batch, epoch+1, model, criterion, config['device'])
+            loss, correct_preds, total_samples, outputs, incorrect_indices= process_batch(batch, epoch+1, model, criterion, config['device'])
 
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
+
+        incorrect_train_samples.extend([batch['sample_indices'][i] for i in incorrect_indices])
 
         total_train_loss += loss.item()
         correct_train_preds += correct_preds
@@ -228,11 +229,14 @@ for epoch in range(config['num_epochs']):
     model.eval()
     total_val_loss, correct_val_preds, total_val_samples = 0, 0, 0
     y_true_val, y_pred_val = [], []
+    incorrect_val_samples = []
 
     with torch.no_grad():
         with autocast(device_type="cuda" if config['device'].type == "cuda" else "cpu"):
             for batch in tqdm(val_loader, desc=f"Validation Epoch {epoch+1}"):
-                loss, correct_preds, total_samples, outputs = process_batch(batch, epoch+1, model, criterion, config['device'])
+                loss, correct_preds, total_samples, outputs, incorrect_indices = process_batch(batch, epoch+1, model, criterion, config['device'])
+                incorrect_val_samples.extend([batch['sample_indices'][i] for i in incorrect_indices])
+
                 total_val_loss += loss.item()
                 correct_val_preds += correct_preds
                 total_val_samples += total_samples
@@ -258,6 +262,10 @@ for epoch in range(config['num_epochs']):
                      f"Val Loss: {val_loss:.4f}, Val Accuracy: {val_accuracy:.4f}, "
                      f"Val Precision: {val_precision:.4f}, Val Recall: {val_recall:.4f}, Val F1: {val_f1:.4f}")
 
+    logging.info(f"==============Incorrect Samples in Epoch {epoch+1}=============="
+        f"Incorrect Train Samples : {incorrect_train_samples}"
+        f"Incorrect Validation Samples : {incorrect_val_samples}"
+    )
 
     # Save Checkpoint
     if (epoch + 1) % SAVE_INTERVALS == 0:

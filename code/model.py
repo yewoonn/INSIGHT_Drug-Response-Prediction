@@ -263,7 +263,6 @@ class DrugResponseModel(nn.Module):
         filtered_sub_embeddings = substructure_embeddings[:, set_global_ids]
 
         # Gene and Substructure Embeddings
-        # start_time = time.time()
         gene_embeddings = self.gene_embedding_layer(gene_embeddings)  # [Batch, Pathway, Gene, Embedding_dim]
         filtered_sub_embeddings = self.substructure_embedding_layer(filtered_sub_embeddings)  # [Batch, Substructure, Embedding_dim]
         
@@ -314,8 +313,6 @@ class DrugResponseModel(nn.Module):
         pathway_graph_embedding = torch.stack(pathway_graph_embeddings, dim=1) # [Batch, Num_Pathways, Embedding_dim]]
         drug_embeddings = torch.mean(torch.stack(drug_embeddings, dim=1), dim=1)
 
-
-        start_time = time.time()
         # Drug Graph Embedding
         drug_graph_embedding = self.drug_graph(
             drug_graphs,     
@@ -328,7 +325,6 @@ class DrugResponseModel(nn.Module):
         final_pathway_embedding = torch.mean(pathway_graph_embedding, dim=1)  # [Batch, Embedding_dim]
         final_drug_embedding = drug_graph_embedding
         
-
         # Concatenate and Predict
         combined_embedding = torch.cat((final_pathway_embedding, final_drug_embedding), dim=-1)  # [B, Dg + H]
 
