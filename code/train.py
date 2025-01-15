@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.amp import GradScaler, autocast
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, precision_recall_curve, auc
 
 import logging
 import time
@@ -28,7 +28,7 @@ config = {
     'depth' : 2,
     'learning_rate': 0.0005,
     'weight_decay': 0.001,
-    'num_epochs': 10,
+    'num_epochs': 5,
     'checkpoint_dir': './checkpoints', # ckpt 디렉토리
     'plot_dir': './plots',
     'log_interval': 10, # batch 별 log 출력 간격
@@ -36,10 +36,10 @@ config = {
     'save_pathways' : [0, 79]
 }
 
-NUM_CELL_LINES = 1280
+NUM_CELL_LINES = 100
 NUM_PATHWAYS = 312
 NUM_GENES = 3848
-NUM_DRUGS = 10
+NUM_DRUGS = 30
 NUM_SUBSTRUCTURES = 194
 
 GENE_EMBEDDING_DIM = 32
@@ -103,7 +103,7 @@ logging.info(
 logging.info(f"CUDA is available: {torch.cuda.is_available()}")
 
 # 1. Data Loader
-train_data = torch.load('dataset/train_dataset.pt')
+train_data = torch.load('/data1/project/seoeun/data/datasplit/dataset/train_dataset_un_cell.pt')
 train_dataset = DrugResponseDataset(
     gene_embeddings=train_data['gene_embeddings'],
     drug_embeddings=train_data['drug_embeddings'],
@@ -112,7 +112,7 @@ train_dataset = DrugResponseDataset(
     sample_indices=train_data['sample_indices'],
 )
 
-val_data = torch.load('dataset/val_dataset.pt')
+val_data = torch.load('/data1/project/seoeun/data/datasplit/dataset/val_dataset_un_cell.pt')
 val_dataset = DrugResponseDataset(
     gene_embeddings=val_data['gene_embeddings'],
     drug_embeddings=val_data['drug_embeddings'],
@@ -124,8 +124,8 @@ val_dataset = DrugResponseDataset(
 train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=True, collate_fn=collate_fn)
 val_loader = DataLoader(val_dataset, batch_size=config['batch_size'], shuffle=False, collate_fn=collate_fn)
 
-pathway_genes_dict = torch.load('./input/0_pathway_genes_dict.pt')
-pathway_graphs = torch.load('./input/0_pathway_graph.pt')
+pathway_genes_dict = torch.load('/data1/project/seoeun/data/pathway_genes_dict.pt')
+pathway_graphs = torch.load('/data1/project/seoeun/data/#_pathway_graph_312.pt')
 
 # 2. Model Initialization
 attn_logger = AttentionLogger()
@@ -219,6 +219,10 @@ for epoch in range(config['num_epochs']):
     train_recall = recall_score(y_true_train, y_pred_train)
     train_f1 = f1_score(y_true_train, y_pred_train)
 
+    train_auc = roc_auc_score(y_true_train, torch.sigmoid(torch.tensor(y_pred_train)).numpy())
+    precision_train, recall_train, _ = precision_recall_curve(y_true_train, torch.sigmoid(torch.tensor(y_pred_train)).numpy())
+    train_prauc = auc(recall_train, precision_train)
+
     train_losses.append(train_loss)
     train_accuracies.append(train_accuracy)
     train_precisions.append(train_precision)
@@ -250,6 +254,10 @@ for epoch in range(config['num_epochs']):
     val_recall = recall_score(y_true_val, y_pred_val)
     val_f1 = f1_score(y_true_val, y_pred_val)
 
+    val_auc = roc_auc_score(y_true_val, torch.sigmoid(torch.tensor(y_pred_val)).numpy())
+    precision_val, recall_val, _ = precision_recall_curve(y_true_val, torch.sigmoid(torch.tensor(y_pred_val)).numpy())
+    val_prauc = auc(recall_val, precision_val)
+
     val_losses.append(val_loss)
     val_accuracies.append(val_accuracy)
     val_precisions.append(val_precision)
@@ -259,10 +267,13 @@ for epoch in range(config['num_epochs']):
     logging.info(f"Epoch [{epoch+1}/{config['num_epochs']}] completed. "
                      f"Train Loss: {train_loss:.4f}, Train Accuracy: {train_accuracy:.4f}, "
                      f"Train Precision: {train_precision:.4f}, Train Recall: {train_recall:.4f}, Train F1: {train_f1:.4f}, "
+                     f"Train AUC: {train_auc:.4f}, Train PRAUC: {train_prauc:.4f} ,"
                      f"Val Loss: {val_loss:.4f}, Val Accuracy: {val_accuracy:.4f}, "
-                     f"Val Precision: {val_precision:.4f}, Val Recall: {val_recall:.4f}, Val F1: {val_f1:.4f}")
+                     f"Val Precision: {val_precision:.4f}, Val Recall: {val_recall:.4f}, Val F1: {val_f1:.4f}"
+                     f"Validation AUC: {val_auc:.4f}, Validation PRAUC: {val_prauc:.4f}"
+                )
 
-    logging.info(f"==============Incorrect Samples in Epoch {epoch+1}=============="
+    logging.info(f"==============Incorrect Samples in Epoch {epoch+1}==============\n"
         f"Incorrect Train Samples : {incorrect_train_samples}"
         f"Incorrect Validation Samples : {incorrect_val_samples}"
     )
