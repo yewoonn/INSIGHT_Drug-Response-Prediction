@@ -23,18 +23,26 @@ num_genes = 3848
 num_drugs = 78
 num_substructures = 194
 
-gene_embeddings = torch.load('./input/0_gene_embeddings.pt')
-pathway_graph_list = torch.load('./input/0_pathway_graph.pt')
+# Gene Embedding
+gene_embeddings = torch.load('../input/0_gene_embeddings.pt')
 
-saved_embeddings = np.load('./input/0_drug_embeddings.npz')
+# Pathway
+pathways = torch.load("../input/0_pathway_graph.pt")
+global_ids_list = [data["global_ids"] for data in pathways]
+global_ids_dict = {index: global_ids for index, global_ids in enumerate(global_ids_list)}
+torch.save(global_ids_dict, "./pathway_genes_dict.pt")
+
+# Drug Embedding
+saved_embeddings = np.load('../input/0_drug_embeddings.npz')
 substructure_embeddings = {
-    key: torch.tensor(saved_embeddings[key], dtype=torch.float32)
+    key: torch.tensor(saved_embeddings[key], dtype=torch.Int)
     for key in saved_embeddings.keys()
 }
 saved_embeddings.close()
-drug_graph_dict = torch.load('./input/0_drug_graph_dict.pt')
+drug_graph_dict = torch.load('../input/0_drug_graph_dict.pt')
 
-labels_dict = torch.load('./input/0_drug_label_dict.pt')
+# Drug Label
+labels_dict = torch.load('../input/0_drug_label_dict.pt')
 
 cell_lines = list(gene_embeddings.keys())
 drugs = list(substructure_embeddings.keys())
@@ -66,7 +74,6 @@ test_gene_embeddings, test_drug_graphs, test_substructure_embeddings, test_label
 # Save train data
 torch.save({
     'gene_embeddings': train_gene_embeddings,
-    'pathway_graphs': pathway_graph_list,
     'substructure_embeddings': train_substructure_embeddings,
     'drug_graphs': train_drug_graphs,
     'labels': train_labels,
@@ -76,7 +83,6 @@ torch.save({
 # Save validation data
 torch.save({
     'gene_embeddings': val_gene_embeddings,
-    'pathway_graphs': pathway_graph_list,
     'substructure_embeddings': val_substructure_embeddings,
     'drug_graphs': val_drug_graphs,
     'labels': val_labels,
@@ -86,7 +92,6 @@ torch.save({
 # Save test data
 torch.save({
     'gene_embeddings': test_gene_embeddings,
-    'pathway_graphs': pathway_graph_list,
     'substructure_embeddings': test_substructure_embeddings,
     'drug_graphs': test_drug_graphs,
     'labels': test_labels,

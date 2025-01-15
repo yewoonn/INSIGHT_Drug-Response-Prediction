@@ -12,7 +12,7 @@ from torch_geometric.nn import GCNConv, global_mean_pool
 
 #  [1] DATASET
 class DrugResponseDataset(Dataset):
-    def __init__(self, gene_embeddings, pathway_graphs, substructure_embeddings, drug_graphs, labels, sample_indices):
+    def __init__(self, gene_embeddings, drug_embeddings, drug_graphs, labels, sample_indices):
         """
         Args:
             gene_embeddings (dict): {cell_line_id: Tensor}, Gene embeddings for each cell line.
@@ -22,9 +22,8 @@ class DrugResponseDataset(Dataset):
             sample_indices (list): [(cell_line_id, drug_idx)], List of cell line and drug index pairs.
         """
         self.gene_embeddings = gene_embeddings  # {cell_line_id: [245, 231]}
-        self.pathway_graphs = pathway_graphs
         self.drug_graphs = drug_graphs  # Drug graphs
-        self.substructure_embeddings = substructure_embeddings  # [170]
+        self.drug_embeddings = drug_embeddings  # [170]
         self.labels = labels  # {cell_line_id, drug_id : [1]}
         self.sample_indices = sample_indices  # [(cell_line_id, drug_id)]
 
@@ -37,10 +36,9 @@ class DrugResponseDataset(Dataset):
 
         # Gene embeddings for the cell line
         gene_embedding = self.gene_embeddings[cell_line_id]  # [245, 231]
-        pathway_graph = self.pathway_graphs  # Pathway graphs
 
         # Substructure embeddings for pathways
-        substructure_embedding = self.substructure_embeddings[drug_id]  # [1, 170]
+        drug_embedding = self.drug_embeddings[drug_id]  # [1, 170]
         drug_graph = self.drug_graphs[drug_id]  # Drug graphs
 
         # Get the label for the cell line-drug pair
@@ -48,39 +46,34 @@ class DrugResponseDataset(Dataset):
 
         return {
             'gene_embedding': gene_embedding,  # [245, 231]
-            'pathway_graph': pathway_graph,                     # List of PyTorch Geometric Data objects
-            'substructure_embedding': substructure_embedding,  # [245, 170]
+            'drug_embedding': drug_embedding,  # [245, 170]
             'drug_graph': drug_graph,  # PyTorch Geometric Data object
-            'label': label,  # Scalar
-            'sample_index': (cell_line_id, drug_id) 
+            'label': label,  # Scalar,
+            'sample_index': (cell_line_id, drug_id)
         }
 
 #  [2] COLLATE FUNCTION
 def collate_fn(batch):
     gene_embeddings = []
-    substructure_embeddings = []
+    drug_embeddings = []
     drug_graphs = []
     labels = []
-    sample_indices = [] 
+    sample_indices = [] # 추가
 
     
     for item in batch:
         gene_embeddings.append(item['gene_embedding'])
-        substructure_embeddings.append(item['substructure_embedding'])
+        drug_embeddings.append(item['drug_embedding'])
         drug_graphs.append(item['drug_graph'])
         labels.append(item['label'])
-        sample_indices.append(item['sample_index']) 
+        sample_indices.append(item['sample_index']) # 추가
 
-
-    pathway_graph = batch[0]['pathway_graph'] 
-    pathway_batch = Batch.from_data_list(pathway_graph)
     drug_batch = Batch.from_data_list(drug_graphs)
 
     return {
         'gene_embeddings': torch.stack(gene_embeddings),  # [batch_size, num_pathways, num_genes]
-        'pathway_graphs': pathway_batch,  
-        'substructure_embeddings': torch.stack(substructure_embeddings),  # [batch_size, num_pathways, num_substructures]
+        'substructure_embeddings': torch.stack(drug_embeddings),  # [batch_size, num_substructures]
         'drug_graphs': drug_batch, # PyTorch Geometric Batch
         'labels': torch.tensor(labels, dtype=torch.float32),  # [batch_size]
-        'sample_indices': sample_indices 
+        'sample_indices': sample_indices # 추가
     }
