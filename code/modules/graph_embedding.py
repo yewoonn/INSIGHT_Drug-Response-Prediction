@@ -1,0 +1,110 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch_geometric.data import Batch
+from torch_geometric.nn import GCNConv, global_mean_pool
+
+#  PATHWAY GRAPH EMBEDDING
+class PathwayGraphEmbedding(nn.Module):
+    def __init__(self, batch_size, input_dim, hidden_dim, pathway_graphs):
+        super(PathwayGraphEmbedding, self).__init__()
+        self.batch_size = batch_size
+        self.conv1 = GCNConv(input_dim, hidden_dim)
+        self.conv2 = GCNConv(hidden_dim, hidden_dim)
+
+        self.cached_batched_graphs = []
+        for pathway_graph in pathway_graphs:
+            repeated_graphs = [pathway_graph.clone() for _ in range(batch_size)]
+            batched_graph = Batch.from_data_list(repeated_graphs)
+            self.cached_batched_graphs.append(batched_graph)
+
+    def forward(self, gene_emb, pathway_idx):
+        """
+        Args:
+            gene_emb: [BATCH_SIZE, MAX_GENE, EMB_DIM]
+            pathway_idx: index for which pathway graph to use
+        """
+        device = gene_emb.device
+        current_batch_size = gene_emb.size(0)
+
+        # 1) 그래프의 유효 노드 수 가져오기
+        base_graph = self.cached_batched_graphs[pathway_idx].to_data_list()[0]  
+        num_nodes_in_graph = base_graph.num_nodes  # 예: 120
+
+        # 2) gene_emb에서 앞쪽 num_nodes_in_graph만 슬라이싱
+        gene_emb = gene_emb[:, :num_nodes_in_graph, :]  # [B, num_nodes_in_graph, E]
+
+        if torch.isnan(gene_emb).any():
+            print("NaN found")
+            raise ValueError(f"Still NaN in gene_emb after slice: shape={gene_emb.shape}")
+
+        # 3) (배치 그래프) 가져오기
+        if current_batch_size == self.batch_size:
+            batched_graph = self.cached_batched_graphs[pathway_idx]
+        else:
+            repeated_graphs = [base_graph.clone() for _ in range(current_batch_size)]
+            batched_graph = Batch.from_data_list(repeated_graphs)
+
+        batched_graph = batched_graph.to(device)
+
+        # 4) 노드 피처 업데이트:  [B, num_nodes, E] -> [B*num_nodes, E]
+        batched_graph.x = gene_emb.reshape(-1, gene_emb.size(-1))
+
+        # 5) GCN
+        x = F.relu(self.conv1(batched_graph.x, batched_graph.edge_index))
+        x = self.conv2(x, batched_graph.edge_index)
+
+        # 6) Global mean pooling
+        graph_embeddings = global_mean_pool(x, batched_graph.batch)  # [B, hidden_dim]
+
+        return graph_embeddings
+
+#  DRUG GRAPH EMBEDDING
+class DrugGraphEmbedding(nn.Module):
+    def __init__(self, input_dim, hidden_dim):
+        super(DrugGraphEmbedding, self).__init__()
+        self.conv1 = GCNConv(input_dim, hidden_dim)
+        self.conv2 = GCNConv(hidden_dim, hidden_dim)
+
+    def forward(self, drug_graph, sub2gene_out):
+        """
+        Args:
+            drug_graph (Batch): Batched PyG Data object (each sample is a drug graph).
+            sub2gene_out (Tensor): [BATCH_SIZE, MAX_SUBSTRUCTURES, EMBEDDING_DIM]
+                - 패딩(또는 NaN)이 있을 수 있음. 
+                - 각 batch 샘플별 실제 유효 substructure 개수는 mapped_num_subs[b].
+            mapped_num_subs (list[int]): 각 배치마다 "유효 substructure 노드" 수.
+                - drug_graph 내부에서도 sample b의 node 수가 동일해야 함 (graph[b].num_nodes)
+        """
+        device = sub2gene_out.device
+        B = sub2gene_out.size(0)
+
+        # 1) 노드 피처 합치기
+        all_node_features = []
+        for b in range(B):
+            # 이 배치 샘플의 실제 substructure node 수
+            num_nodes_b = drug_graph[b].num_nodes
+            # sub2gene_out[b, :num_nodes_b, :] 를 추출
+            emb_b = sub2gene_out[b, :num_nodes_b, :]  # [num_nodes_b, E]
+
+            if torch.isnan(emb_b).any():
+                print("NaN found")
+                raise ValueError(f"NaN found in sub2gene_out for batch={b}.")
+
+            all_node_features.append(emb_b)
+
+        # 2) cat => shape: [ (sum of all num_nodes_b), E ]
+        cat_node_features = torch.cat(all_node_features, dim=0)
+
+        # 3) graph.x에 넣기
+        drug_graph.x = cat_node_features.to(device)
+
+        # 4) GCNConv
+        x = self.conv1(drug_graph.x, drug_graph.edge_index)
+        x = F.relu(x)
+        x = self.conv2(x, drug_graph.edge_index)
+
+        # 5) global mean pooling
+        graph_embedding = global_mean_pool(x, drug_graph.batch)  # [B, hidden_dim]
+
+        return graph_embedding

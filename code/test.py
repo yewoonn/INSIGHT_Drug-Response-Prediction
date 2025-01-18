@@ -16,14 +16,14 @@ from utils import AttentionLogger
 # Configuration
 config = {
     'device': torch.device("cuda:0" if torch.cuda.is_available() else "cpu"),
-    'batch_size': 64,
+    'batch_size': 128,
     'checkpoint_path': './checkpoints/20250114_23/ckpt_epoch_10.pth', # 변경 필요
     'test_data_path': 'dataset/test_dataset.pt',
 }
 
 NUM_PATHWAYS = 312
-NUM_GENES = 3848
-NUM_SUBSTRUCTURES = 194
+NUM_GENES = 245
+NUM_SUBSTRUCTURES = 7
 GENE_EMBEDDING_DIM = 32
 SUBSTRUCTURE_EMBEDDING_DIM = 32
 HIDDEN_DIM = 32
@@ -59,12 +59,10 @@ test_dataset = DrugResponseDataset(
 test_loader = DataLoader(test_dataset, batch_size=config['batch_size'], shuffle=False, collate_fn=collate_fn)
 
 # 2. Load Pathway Information
-pathway_genes_dict = torch.load('./input/0_pathway_genes_dict.pt')
-pathway_graphs = torch.load('./input/0_pathway_graph.pt')
+pathway_genes_dict = torch.load('./input_10/pathway_genes_dict.pt')
+pathway_graphs = torch.load('./input_10/pathway_graph.pt')
 
 # 3. Model Initialization
-dummy_logger = AttentionLogger()  # 또는 필요 없을 경우 None 사용
-
 model = DrugResponseModel(
     num_pathways=NUM_PATHWAYS,
     pathway_graphs=pathway_graphs,
@@ -80,9 +78,7 @@ model = DrugResponseModel(
     is_differ=True,  # 또는 False, 테스트에 적합한 값으로 설정
     depth=1,         # 필요한 값으로 설정
     save_intervals=10,  # 로깅 간격
-    save_pathways=[0],  # 테스트용 경로 ID
     file_name="test",   # 테스트 파일 이름
-    attn_logger=dummy_logger  # 또는 None
 )
 
 checkpoint = torch.load(config['checkpoint_path'], map_location=config['device'])

@@ -2,8 +2,9 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from torch.amp import GradScaler, autocast
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, precision_recall_curve, auc
+# torch.autograd.set_detect_anomaly(True)
+import numpy as np
 
 import logging
 import time
@@ -13,34 +14,32 @@ import os
 
 from dataset import DrugResponseDataset, collate_fn
 from model import DrugResponseModel
-from utils import plot_statics, AttentionLogger
+from utils import plot_statics
 
 os.environ['TZ'] = 'Asia/Seoul'
 time.tzset()  # Unix 환경에서 적용
-# os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:1024' # OR 512
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 
 # Configuration
 config = {
-    'device': torch.device("cuda:0" if torch.cuda.is_available() else "cpu"),
-    'batch_size': 64,
+    'device': torch.device("cuda:1" if torch.cuda.is_available() else "cpu"),
+    'batch_size': 128,
     'is_differ' : True,
     'depth' : 2,
-    'learning_rate': 0.0005,
+    'learning_rate': 0.0001,
     'weight_decay': 0.001,
-    'num_epochs': 5,
+    'num_epochs': 1,
     'checkpoint_dir': './checkpoints', # ckpt 디렉토리
     'plot_dir': './plots',
     'log_interval': 10, # batch 별 log 출력 간격
-    'save_interval': 10, # ckpt 저장할 epoch 간격
-    'save_pathways' : [0, 79]
+    'save_interval': 1, # ckpt 저장할 epoch 간격
 }
 
-NUM_CELL_LINES = 100
+NUM_CELL_LINES = 1280
 NUM_PATHWAYS = 312
-NUM_GENES = 3848
-NUM_DRUGS = 30
-NUM_SUBSTRUCTURES = 194
+NUM_GENES = 245
+NUM_DRUGS = 10
+NUM_SUBSTRUCTURES = 7 # full : 11
 
 GENE_EMBEDDING_DIM = 32
 SUBSTRUCTURE_EMBEDDING_DIM = 32
@@ -54,11 +53,14 @@ DEPTH = config['depth']
 
 FILE_NAME = datetime.now().strftime('%Y%m%d_%H')
 SAVE_INTERVALS = config['save_interval']
-SAVE_PATHWAYS = config['save_pathways']
+
 log_filename = f"log/train/{FILE_NAME}.log"
 
 chpt_dir = f"{config['checkpoint_dir']}/{FILE_NAME}"
 os.makedirs(chpt_dir, exist_ok=True)
+
+attn_dir = f"weights/{FILE_NAME}"
+os.makedirs(attn_dir, exist_ok=True)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -103,20 +105,22 @@ logging.info(
 logging.info(f"CUDA is available: {torch.cuda.is_available()}")
 
 # 1. Data Loader
-train_data = torch.load('/data1/project/seoeun/data/datasplit/dataset/train_dataset_un_cell.pt')
+train_data = torch.load('./dataset/train_dataset.pt')
 train_dataset = DrugResponseDataset(
     gene_embeddings=train_data['gene_embeddings'],
     drug_embeddings=train_data['drug_embeddings'],
     drug_graphs=train_data['drug_graphs'],
+    drug_masks = train_data['drug_masks'],
     labels=train_data['labels'],
     sample_indices=train_data['sample_indices'],
 )
 
-val_data = torch.load('/data1/project/seoeun/data/datasplit/dataset/val_dataset_un_cell.pt')
+val_data = torch.load('./dataset/val_dataset.pt')
 val_dataset = DrugResponseDataset(
     gene_embeddings=val_data['gene_embeddings'],
     drug_embeddings=val_data['drug_embeddings'],
     drug_graphs=val_data['drug_graphs'],
+    drug_masks = val_data['drug_masks'],
     labels=val_data['labels'],
     sample_indices=val_data['sample_indices'],
 )
@@ -124,12 +128,28 @@ val_dataset = DrugResponseDataset(
 train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=True, collate_fn=collate_fn)
 val_loader = DataLoader(val_dataset, batch_size=config['batch_size'], shuffle=False, collate_fn=collate_fn)
 
-pathway_genes_dict = torch.load('/data1/project/seoeun/data/pathway_genes_dict.pt')
-pathway_graphs = torch.load('/data1/project/seoeun/data/#_pathway_graph_312.pt')
+pathway_graphs = torch.load('./input_full/pathway_graph.pt')
+pathway_masks = torch.load('./input_full/pathway_mask.pt')
 
 # 2. Model Initialization
-attn_logger = AttentionLogger()
-model = DrugResponseModel(NUM_PATHWAYS, pathway_graphs, pathway_genes_dict, NUM_GENES, NUM_SUBSTRUCTURES, GENE_EMBEDDING_DIM, SUBSTRUCTURE_EMBEDDING_DIM, HIDDEN_DIM, FINAL_DIM, OUTPUT_DIM, BATCH_SIZE, IS_DIFFER, DEPTH, SAVE_INTERVALS, SAVE_PATHWAYS,FILE_NAME, attn_logger)
+model = DrugResponseModel(
+    pathway_graphs = pathway_graphs, 
+    pathway_masks = pathway_masks,
+    num_pathways = NUM_PATHWAYS, 
+    num_genes = NUM_GENES, 
+    num_substructures = NUM_SUBSTRUCTURES, 
+    gene_dim = GENE_EMBEDDING_DIM, 
+    substructure_dim = SUBSTRUCTURE_EMBEDDING_DIM, 
+    hidden_dim = HIDDEN_DIM, 
+    final_dim = FINAL_DIM, 
+    output_dim = OUTPUT_DIM,
+    batch_size = BATCH_SIZE, 
+    is_differ = IS_DIFFER, 
+    depth = DEPTH, 
+    save_intervals = SAVE_INTERVALS, 
+    file_name = FILE_NAME
+)
+
 logging.info(f"Initial GPU memory usage (before moving model to device): "
              f"{torch.cuda.memory_allocated(config['device']) / 1e6:.2f} MB allocated, "
              f"{torch.cuda.memory_reserved(config['device']) / 1e6:.2f} MB reserved.")
@@ -147,20 +167,31 @@ criterion = nn.BCEWithLogitsLoss()
 optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'], weight_decay=config['weight_decay'])
 logging.info(f"Model initialized on device: {config['device']}")
 
-
 # 3. Helper Function
-def process_batch(batch, epoch, model, criterion, device):
-    gene_embeddings = batch['gene_embeddings'].to(device)
-    drug_embeddings = batch['drug_embeddings'].to(device)
-    drug_graphs = batch['drug_graphs'].to(device)
-    labels = batch['labels'].to(device)
-    sample_indices = batch['sample_indices'] 
-    
-    with autocast(device_type="cuda" if config['device'].type == "cuda" else "cpu"):
-        outputs = model(gene_embeddings, drug_embeddings, drug_graphs, epoch, sample_indices)
-        outputs = outputs.squeeze(dim=-1) 
-        loss = criterion(outputs, labels) 
+def process_batch(batch_idx, batch, epoch, model, criterion, device):
+    gene_embeddings = batch['gene_embeddings'].to(device) # [Batch, Pathway_num, Max_Gene]
+    drug_embeddings = batch['drug_embeddings'].to(device) # [Batch, Max_Sub]
+    drug_graphs = batch['drug_graphs'].to(device) # DataBatch
+    drug_masks = batch['drug_masks'].to(device) # [Batch, Max_Sub]
+    labels = batch['labels'].to(device) # [Batch]
+    sample_indices = batch['sample_indices']
 
+    outputs, gene2sub_weights, sub2gene_weights = model(gene_embeddings, drug_embeddings, drug_graphs, drug_masks, epoch, sample_indices)
+    outputs = outputs.squeeze(dim=-1) 
+    loss = criterion(outputs, labels) 
+
+    if (batch_idx == 0) and ((epoch) % SAVE_INTERVALS == 0):
+        save_dir = f"{attn_dir}/epoch_{epoch}"
+        os.makedirs(save_dir, exist_ok=True)
+        sample_indices = sample_indices
+        g2s = gene2sub_weights.detach().cpu()
+        s2g = sub2gene_weights.detach().cpu()
+        torch.save(sample_indices, f"{save_dir}/B{batch_idx}_samples.pt")
+        torch.save(g2s, f"{save_dir}/B{batch_idx}_gene2sub.pt")
+        torch.save(s2g, f"{save_dir}/B{batch_idx}_sub2gene.pt")
+        logging.info(f"Epoch {epoch}, Batch {batch_idx} Gene2Sub, Sub2Gene Attention Weights saved. ")            
+
+    
     preds = (torch.sigmoid(outputs) > 0.5).long() 
     correct_preds = (preds == labels).sum().item()
     total_samples = labels.size(0)
@@ -175,8 +206,6 @@ train_precisions, val_precisions = [], []
 train_recalls, val_recalls = [], []
 train_f1s, val_f1s = [], []
 
-scaler = GradScaler()
-
 for epoch in range(config['num_epochs']):
     epoch_start = time.time()
     logging.info(f"Epoch [{epoch+1}/{config['num_epochs']}] started.")
@@ -189,13 +218,9 @@ for epoch in range(config['num_epochs']):
 
     for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Train Epoch {epoch+1}")):
         optimizer.zero_grad()
-        
-        with autocast(device_type="cuda" if config['device'].type == "cuda" else "cpu"):
-            loss, correct_preds, total_samples, outputs, incorrect_indices= process_batch(batch, epoch+1, model, criterion, config['device'])
-
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
+        loss, correct_preds, total_samples, outputs, incorrect_indices= process_batch(batch_idx, batch, epoch+1, model, criterion, config['device'])
+        loss.backward()
+        optimizer.step()
 
         incorrect_train_samples.extend([batch['sample_indices'][i] for i in incorrect_indices])
 
@@ -204,14 +229,10 @@ for epoch in range(config['num_epochs']):
         total_train_samples += total_samples
 
         y_true_train.extend(batch['labels'].cpu().numpy())  
-        y_pred_train.extend((torch.sigmoid(outputs).detach().cpu().numpy() > 0.5).astype(int))
-
+        y_pred_train.extend((torch.sigmoid(outputs).float().detach().cpu().numpy() > 0.5).astype(int))
 
         if batch_idx % config['log_interval'] == 0:
             logging.info(f"Batch {batch_idx+1}: Loss: {loss.item():.4f}, ")            
-
-        if ((epoch+1) % SAVE_INTERVALS == 0):
-            model.attn_logger.flush_to_json(model.file_name, epoch+1)
 
     train_loss = total_train_loss / len(train_loader)
     train_accuracy = accuracy_score(y_true_train, y_pred_train)
@@ -219,6 +240,12 @@ for epoch in range(config['num_epochs']):
     train_recall = recall_score(y_true_train, y_pred_train)
     train_f1 = f1_score(y_true_train, y_pred_train)
 
+    if len(np.unique(y_true_train)) > 1:
+        train_auc = roc_auc_score(y_true_train, torch.sigmoid(torch.tensor(y_pred_train)).numpy())
+    else:
+        logging.info("Only one class present in y_true_train. Skipping AUC calculation.")
+        train_auc = None
+    
     train_auc = roc_auc_score(y_true_train, torch.sigmoid(torch.tensor(y_pred_train)).numpy())
     precision_train, recall_train, _ = precision_recall_curve(y_true_train, torch.sigmoid(torch.tensor(y_pred_train)).numpy())
     train_prauc = auc(recall_train, precision_train)
@@ -236,17 +263,14 @@ for epoch in range(config['num_epochs']):
     incorrect_val_samples = []
 
     with torch.no_grad():
-        with autocast(device_type="cuda" if config['device'].type == "cuda" else "cpu"):
-            for batch in tqdm(val_loader, desc=f"Validation Epoch {epoch+1}"):
-                loss, correct_preds, total_samples, outputs, incorrect_indices = process_batch(batch, epoch+1, model, criterion, config['device'])
-                incorrect_val_samples.extend([batch['sample_indices'][i] for i in incorrect_indices])
-
-                total_val_loss += loss.item()
-                correct_val_preds += correct_preds
-                total_val_samples += total_samples
-
-                y_true_val.extend(batch['labels'].cpu().numpy())  # GPU -> CPU 변환
-                y_pred_val.extend((torch.sigmoid(outputs).detach().cpu().numpy() > 0.5).astype(int))  # GPU -> CPU 변환 후 NumPy 변환
+        for batch in tqdm(val_loader, desc=f"Validation Epoch {epoch+1}"):
+            loss, correct_preds, total_samples, outputs, incorrect_indices = process_batch(batch, epoch+1, model, criterion, config['device'])
+            incorrect_val_samples.extend([batch['sample_indices'][i] for i in incorrect_indices])
+            total_val_loss += loss.item()
+            correct_val_preds += correct_preds
+            total_val_samples += total_samples
+            y_true_val.extend(batch['labels'].cpu().numpy())  # GPU -> CPU 변환
+            y_pred_val.extend((torch.sigmoid(outputs).detach().cpu().numpy() > 0.5).astype(int))  # GPU -> CPU 변환 후 NumPy 변환
             
     val_loss = total_val_loss / len(val_loader)
     val_accuracy = accuracy_score(y_true_val, y_pred_val)
@@ -269,7 +293,7 @@ for epoch in range(config['num_epochs']):
                      f"Train Precision: {train_precision:.4f}, Train Recall: {train_recall:.4f}, Train F1: {train_f1:.4f}, "
                      f"Train AUC: {train_auc:.4f}, Train PRAUC: {train_prauc:.4f} ,"
                      f"Val Loss: {val_loss:.4f}, Val Accuracy: {val_accuracy:.4f}, "
-                     f"Val Precision: {val_precision:.4f}, Val Recall: {val_recall:.4f}, Val F1: {val_f1:.4f}"
+                     f"Val Precision: {val_precision:.4f}, Val Recall: {val_recall:.4f}, Val F1: {val_f1:.4f} "
                      f"Validation AUC: {val_auc:.4f}, Validation PRAUC: {val_prauc:.4f}"
                 )
 

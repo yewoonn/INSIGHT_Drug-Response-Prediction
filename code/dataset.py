@@ -1,32 +1,18 @@
 import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import DataLoader, Dataset
-import numpy as np
-import torch.nn.functional as F
-from itertools import product
-import numpy as np
-import matplotlib.pyplot as plt
-from torch_geometric.data import Data, Batch
-from torch_geometric.nn import GCNConv, global_mean_pool
+from torch.utils.data import Dataset
+from torch_geometric.data import Batch
 
-#  [1] DATASET
+#  DATASET
 class DrugResponseDataset(Dataset):
-    def __init__(self, gene_embeddings, drug_embeddings, drug_graphs, labels, sample_indices):
-        """
-        Args:
-            gene_embeddings (dict): {cell_line_id: Tensor}, Gene embeddings for each cell line.
-            drug_graphs (dict): List of PyTorch Geometric Data objects for each drug (indexed by drug_id).
-            substructure_embeddings (Tensor): [245, 193], Substructure embeddings for pathways.
-            labels (dict): {cell_line_id: Tensor}, Drug response labels for each cell line and drug pair.
-            sample_indices (list): [(cell_line_id, drug_idx)], List of cell line and drug index pairs.
-        """
-        self.gene_embeddings = gene_embeddings  # {cell_line_id: [245, 231]}
+    def __init__(self, gene_embeddings, drug_embeddings, drug_graphs, drug_masks, labels, sample_indices):
+        self.gene_embeddings = gene_embeddings  # {cell_line: [312, 245]}
+
+        self.drug_embeddings = drug_embeddings  #  {drug: [11]}
         self.drug_graphs = drug_graphs  # Drug graphs
-        self.drug_embeddings = drug_embeddings  # [170]
+        self.drug_masks = drug_masks  # {drug: [11]}
+
         self.labels = labels  # {cell_line_id, drug_id : [1]}
         self.sample_indices = sample_indices  # [(cell_line_id, drug_id)]
-
 
     def __len__(self):
         return len(self.sample_indices)
@@ -35,21 +21,23 @@ class DrugResponseDataset(Dataset):
         cell_line_id, drug_id = self.sample_indices[idx]
 
         # Gene embeddings for the cell line
-        gene_embedding = self.gene_embeddings[cell_line_id]  # [245, 231]
+        gene_embedding = self.gene_embeddings[cell_line_id]  # [Pathway_num, Max_Gene]
 
         # Substructure embeddings for pathways
-        drug_embedding = self.drug_embeddings[drug_id]  # [1, 170]
-        drug_graph = self.drug_graphs[drug_id]  # Drug graphs
+        drug_embedding = self.drug_embeddings[drug_id]  # [1, Max_Sub]
+        drug_graph = self.drug_graphs[drug_id]  # Drug graph
+        drug_masks = self.drug_masks[drug_id]  # [1, Max_Sub]
 
-        # Get the label for the cell line-drug pair
-        label = self.labels[cell_line_id, drug_id]  # Scalar
+        # Response label for the cell line-drug pair
+        label = self.labels[cell_line_id, drug_id]  # [1]
 
         return {
-            'gene_embedding': gene_embedding,  # [245, 231]
-            'drug_embedding': drug_embedding,  # [245, 170]
+            'gene_embedding': gene_embedding,  # [312, 245]
+            'drug_embedding': drug_embedding,  # [1, 11]
             'drug_graph': drug_graph,  # PyTorch Geometric Data object
-            'label': label,  # Scalar,
-            'sample_index': (cell_line_id, drug_id)
+            'drug_masks' : drug_masks, # [1, 11]
+            'label': label,  # [1]
+            'sample_index': (cell_line_id, drug_id) 
         }
 
 #  [2] COLLATE FUNCTION
@@ -57,23 +45,26 @@ def collate_fn(batch):
     gene_embeddings = []
     drug_embeddings = []
     drug_graphs = []
+    drug_masks = []
     labels = []
-    sample_indices = [] # 추가
+    sample_indices = []
 
     
     for item in batch:
         gene_embeddings.append(item['gene_embedding'])
         drug_embeddings.append(item['drug_embedding'])
         drug_graphs.append(item['drug_graph'])
+        drug_masks.append(item['drug_masks'])
         labels.append(item['label'])
-        sample_indices.append(item['sample_index']) # 추가
+        sample_indices.append(item['sample_index'])
 
     drug_batch = Batch.from_data_list(drug_graphs)
 
     return {
-        'gene_embeddings': torch.stack(gene_embeddings),  # [batch_size, num_pathways, num_genes]
-        'drug_embeddings': torch.stack(drug_embeddings),  # [batch_size, num_substructures]
+        'gene_embeddings': torch.stack(gene_embeddings),  # [Batch, Pathway_num, Max_Gene]
+        'drug_embeddings': torch.stack(drug_embeddings),  # [Batch, Max_Sub]
+        'drug_masks': torch.stack(drug_masks, dim=0),
         'drug_graphs': drug_batch, # PyTorch Geometric Batch
-        'labels': torch.tensor(labels, dtype=torch.float32),  # [batch_size]
-        'sample_indices': sample_indices # 추가
+        'labels': torch.tensor(labels, dtype=torch.float32),  # [Batch]
+        'sample_indices': sample_indices # [Batch]
     }
