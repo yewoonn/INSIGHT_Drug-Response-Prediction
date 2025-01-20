@@ -3,8 +3,9 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, precision_recall_curve, auc
-# torch.autograd.set_detect_anomaly(True)
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 import numpy as np
+import random
 
 import logging
 import time
@@ -22,24 +23,24 @@ os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 
 # Configuration
 config = {
-    'device': torch.device("cuda:1" if torch.cuda.is_available() else "cpu"),
+    'device': torch.device("cuda:0" if torch.cuda.is_available() else "cpu"),
     'batch_size': 128,
     'is_differ' : True,
     'depth' : 2,
-    'learning_rate': 0.0001,
-    'weight_decay': 0.001,
-    'num_epochs': 1,
+    'learning_rate': 0.05,
+    'weight_decay': 0.1,
+    'num_epochs': 20,
     'checkpoint_dir': './checkpoints', # ckpt 디렉토리
     'plot_dir': './plots',
     'log_interval': 10, # batch 별 log 출력 간격
-    'save_interval': 1, # ckpt 저장할 epoch 간격
+    'save_interval': 30, # ckpt 저장할 epoch 간격
 }
 
 NUM_CELL_LINES = 1280
 NUM_PATHWAYS = 312
-NUM_GENES = 245
+NUM_GENES = 245 # 고정
 NUM_DRUGS = 10
-NUM_SUBSTRUCTURES = 7 # full : 11
+NUM_SUBSTRUCTURES = 11 # 고정 full : 11, drug 10 : 7
 
 GENE_EMBEDDING_DIM = 32
 SUBSTRUCTURE_EMBEDDING_DIM = 32
@@ -125,6 +126,13 @@ val_dataset = DrugResponseDataset(
     sample_indices=val_data['sample_indices'],
 )
 
+# Seed 설정
+seed = 42
+torch.manual_seed(seed)
+np.random.seed(seed)
+random.seed(seed)
+torch.cuda.manual_seed_all(seed)
+
 train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=True, collate_fn=collate_fn)
 val_loader = DataLoader(val_dataset, batch_size=config['batch_size'], shuffle=False, collate_fn=collate_fn)
 
@@ -164,8 +172,20 @@ logging.info(f"Total model parameters: {total_params:,}")
 logging.info(f"Trainable model parameters: {trainable_params:,}")
 
 criterion = nn.BCEWithLogitsLoss()
-optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'], weight_decay=config['weight_decay'])
+optimizer = optim.Adam(
+    model.parameters(),
+    lr=config['learning_rate'],
+    weight_decay=config['weight_decay']
+)
 logging.info(f"Model initialized on device: {config['device']}")
+
+scheduler = ReduceLROnPlateau(
+    optimizer, 
+    mode='min',  # Loss가 최소화될 때 반응
+    factor=0.5,  
+    patience=3,  # 3 에폭 동안 Loss 개선 없을 경우
+    verbose=True
+)
 
 # 3. Helper Function
 def process_batch(batch_idx, batch, epoch, model, criterion, device):
@@ -176,26 +196,32 @@ def process_batch(batch_idx, batch, epoch, model, criterion, device):
     labels = batch['labels'].to(device) # [Batch]
     sample_indices = batch['sample_indices']
 
-    outputs, gene2sub_weights, sub2gene_weights = model(gene_embeddings, drug_embeddings, drug_graphs, drug_masks, epoch, sample_indices)
+    outputs, gene2sub_weights, sub2gene_weights, final_pathway_embedding, final_drug_embedding = model(gene_embeddings, drug_embeddings, drug_graphs, drug_masks, epoch, sample_indices)
     outputs = outputs.squeeze(dim=-1) 
     loss = criterion(outputs, labels) 
 
-    if (batch_idx == 0) and ((epoch) % SAVE_INTERVALS == 0):
-        save_dir = f"{attn_dir}/epoch_{epoch}"
-        os.makedirs(save_dir, exist_ok=True)
-        sample_indices = sample_indices
-        g2s = gene2sub_weights.detach().cpu()
-        s2g = sub2gene_weights.detach().cpu()
-        torch.save(sample_indices, f"{save_dir}/B{batch_idx}_samples.pt")
-        torch.save(g2s, f"{save_dir}/B{batch_idx}_gene2sub.pt")
-        torch.save(s2g, f"{save_dir}/B{batch_idx}_sub2gene.pt")
-        logging.info(f"Epoch {epoch}, Batch {batch_idx} Gene2Sub, Sub2Gene Attention Weights saved. ")            
-
-    
-    preds = (torch.sigmoid(outputs) > 0.5).long() 
+    probs = torch.sigmoid(outputs)
+    preds = (probs > 0.5).long() 
     correct_preds = (preds == labels).sum().item()
     total_samples = labels.size(0)
     incorrect_indices = [idx for idx, (pred, label) in enumerate(zip(preds, labels)) if pred != label]
+
+    if ((batch_idx == 0) and (epoch % SAVE_INTERVALS == 0)):
+        save_dir = f"{attn_dir}/epoch_{epoch}"
+        os.makedirs(save_dir, exist_ok=True)
+        
+        torch.save(sample_indices, f"{save_dir}/B{batch_idx}_samples.pt")
+        torch.save(gene2sub_weights.detach().cpu(), f"{save_dir}/B{batch_idx}_gene2sub.pt")
+        torch.save(sub2gene_weights.detach().cpu(), f"{save_dir}/B{batch_idx}_sub2gene.pt")
+        torch.save(final_pathway_embedding.detach().cpu(), f"{save_dir}/B{batch_idx}_pathway_embedding.pt")
+        torch.save(final_drug_embedding.detach().cpu(), f"{save_dir}/B{batch_idx}_drug_embedding.pt")
+        torch.save(probs.detach().cpu(), f"{save_dir}/B{batch_idx}_probs.pt")
+        torch.save(labels.detach().cpu(), f"{save_dir}/B{batch_idx}_labels.pt")
+
+        logging.info(
+            f"Epoch {epoch}, Batch {batch_idx}: Saved Gene2Sub, Sub2Gene Attention Weights, "
+            f"Pathway & Drug Embeddings, Probs, and Labels to {save_dir}."
+        )          
 
     return loss, correct_preds, total_samples, outputs, incorrect_indices
 
@@ -264,7 +290,7 @@ for epoch in range(config['num_epochs']):
 
     with torch.no_grad():
         for batch in tqdm(val_loader, desc=f"Validation Epoch {epoch+1}"):
-            loss, correct_preds, total_samples, outputs, incorrect_indices = process_batch(batch, epoch+1, model, criterion, config['device'])
+            loss, correct_preds, total_samples, outputs, incorrect_indices= process_batch(batch_idx, batch, epoch+1, model, criterion, config['device'])
             incorrect_val_samples.extend([batch['sample_indices'][i] for i in incorrect_indices])
             total_val_loss += loss.item()
             correct_val_preds += correct_preds
@@ -282,6 +308,8 @@ for epoch in range(config['num_epochs']):
     precision_val, recall_val, _ = precision_recall_curve(y_true_val, torch.sigmoid(torch.tensor(y_pred_val)).numpy())
     val_prauc = auc(recall_val, precision_val)
 
+    scheduler.step(val_loss)
+
     val_losses.append(val_loss)
     val_accuracies.append(val_accuracy)
     val_precisions.append(val_precision)
@@ -291,20 +319,21 @@ for epoch in range(config['num_epochs']):
     logging.info(f"Epoch [{epoch+1}/{config['num_epochs']}] completed. "
                      f"Train Loss: {train_loss:.4f}, Train Accuracy: {train_accuracy:.4f}, "
                      f"Train Precision: {train_precision:.4f}, Train Recall: {train_recall:.4f}, Train F1: {train_f1:.4f}, "
-                     f"Train AUC: {train_auc:.4f}, Train PRAUC: {train_prauc:.4f} ,"
+                     f"Train AUC: {train_auc:.4f}, Train PRAUC: {train_prauc:.4f}, "
                      f"Val Loss: {val_loss:.4f}, Val Accuracy: {val_accuracy:.4f}, "
-                     f"Val Precision: {val_precision:.4f}, Val Recall: {val_recall:.4f}, Val F1: {val_f1:.4f} "
-                     f"Validation AUC: {val_auc:.4f}, Validation PRAUC: {val_prauc:.4f}"
+                     f"Val Precision: {val_precision:.4f}, Val Recall: {val_recall:.4f}, Val F1: {val_f1:.4f}, "
+                     f"Validation AUC: {val_auc:.4f}, Validation PRAUC: {val_prauc:.4f}\n"
                 )
+    logging.info(f"Current Learning Rate: {optimizer.param_groups[0]['lr']}, Weight Decay: {optimizer.param_groups[0]['weight_decay']}")
 
-    logging.info(f"==============Incorrect Samples in Epoch {epoch+1}==============\n"
-        f"Incorrect Train Samples : {incorrect_train_samples}"
-        f"Incorrect Validation Samples : {incorrect_val_samples}"
-    )
+    # logging.info(f"==============Incorrect Samples in Epoch {epoch+1}==============\n"
+    #     f"Incorrect Train Samples : {incorrect_train_samples}"
+    #     f"Incorrect Validation Samples : {incorrect_val_samples}"
+    # )
 
     # Save Checkpoint
     if (epoch + 1) % SAVE_INTERVALS == 0:
-        checkpoint_path = f"{chpt_dir}/ckpt_epoch_{epoch+1}.pth" # 체크 포인트 수정됨
+        checkpoint_path = f"{chpt_dir}/ckpt_epoch_{epoch+1}.pth" 
         torch.save({
             'epoch': epoch + 1,
             'model_state_dict': model.state_dict(),
