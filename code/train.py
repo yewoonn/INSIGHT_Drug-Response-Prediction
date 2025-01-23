@@ -23,24 +23,24 @@ os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 
 # Configuration
 config = {
-    'device': torch.device("cuda:0" if torch.cuda.is_available() else "cpu"),
+    'device': torch.device("cuda:1" if torch.cuda.is_available() else "cpu"),
     'batch_size': 128,
     'is_differ' : True,
     'depth' : 2,
     'learning_rate': 0.05,
-    'weight_decay': 0.1,
+    'weight_decay': 0.01,
     'num_epochs': 20,
     'checkpoint_dir': './checkpoints', # ckpt 디렉토리
     'plot_dir': './plots',
     'log_interval': 10, # batch 별 log 출력 간격
-    'save_interval': 30, # ckpt 저장할 epoch 간격
+    'save_interval': 1, # ckpt 저장할 epoch 간격
 }
 
 NUM_CELL_LINES = 1280
 NUM_PATHWAYS = 312
 NUM_GENES = 245 # 고정
 NUM_DRUGS = 10
-NUM_SUBSTRUCTURES = 11 # 고정 full : 11, drug 10 : 7
+NUM_SUBSTRUCTURES = 7 # 고정 full : 11, drug 10 : 7
 
 GENE_EMBEDDING_DIM = 32
 SUBSTRUCTURE_EMBEDDING_DIM = 32
@@ -163,14 +163,6 @@ logging.info(f"Initial GPU memory usage (before moving model to device): "
              f"{torch.cuda.memory_reserved(config['device']) / 1e6:.2f} MB reserved.")
 
 model = model.to(config['device'])
-
-# 모델 파라미터 개수 확인
-total_params = sum(p.numel() for p in model.parameters())
-trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-
-logging.info(f"Total model parameters: {total_params:,}")
-logging.info(f"Trainable model parameters: {trainable_params:,}")
-
 criterion = nn.BCEWithLogitsLoss()
 optimizer = optim.Adam(
     model.parameters(),
@@ -186,6 +178,18 @@ scheduler = ReduceLROnPlateau(
     patience=3,  # 3 에폭 동안 Loss 개선 없을 경우
     verbose=True
 )
+
+# 저장할 샘플
+target_samples = {
+    ('DATA.684052', 'BORTEZOMIB'),
+    ('DATA.688001', 'BORTEZOMIB'),
+    ('DATA.684062', 'BORTEZOMIB'),
+    ('DATA.688023', 'BORTEZOMIB'),
+    ('DATA.688001', 'PACLITAXEL'),
+    ('DATA.684052', 'PACLITAXEL'),
+    ('DATA.684062', 'PACLITAXEL'),
+    ('DATA.688023', 'PACLITAXEL'),
+}
 
 # 3. Helper Function
 def process_batch(batch_idx, batch, epoch, model, criterion, device):
@@ -206,22 +210,28 @@ def process_batch(batch_idx, batch, epoch, model, criterion, device):
     total_samples = labels.size(0)
     incorrect_indices = [idx for idx, (pred, label) in enumerate(zip(preds, labels)) if pred != label]
 
-    if ((batch_idx == 0) and (epoch % SAVE_INTERVALS == 0)):
+    if epoch % SAVE_INTERVALS == 0:
         save_dir = f"{attn_dir}/epoch_{epoch}"
         os.makedirs(save_dir, exist_ok=True)
-        
-        torch.save(sample_indices, f"{save_dir}/B{batch_idx}_samples.pt")
-        torch.save(gene2sub_weights.detach().cpu(), f"{save_dir}/B{batch_idx}_gene2sub.pt")
-        torch.save(sub2gene_weights.detach().cpu(), f"{save_dir}/B{batch_idx}_sub2gene.pt")
         torch.save(final_pathway_embedding.detach().cpu(), f"{save_dir}/B{batch_idx}_pathway_embedding.pt")
         torch.save(final_drug_embedding.detach().cpu(), f"{save_dir}/B{batch_idx}_drug_embedding.pt")
-        torch.save(probs.detach().cpu(), f"{save_dir}/B{batch_idx}_probs.pt")
-        torch.save(labels.detach().cpu(), f"{save_dir}/B{batch_idx}_labels.pt")
+        torch.save(sample_indices, f"{save_dir}/B{batch_idx}_samples.pt")
 
-        logging.info(
-            f"Epoch {epoch}, Batch {batch_idx}: Saved Gene2Sub, Sub2Gene Attention Weights, "
-            f"Pathway & Drug Embeddings, Probs, and Labels to {save_dir}."
-        )          
+        for i, sample in enumerate(sample_indices):
+            if sample in target_samples:  # Check if sample is in the target list
+                print("sample", sample)
+                sample_save_dir = f"{save_dir}/sample_{sample[0]}_{sample[1]}"
+                os.makedirs(sample_save_dir, exist_ok=True)
+
+                torch.save(gene2sub_weights[i].detach().cpu(), f"{sample_save_dir}/gene2sub.pt")
+                torch.save(sub2gene_weights[i].detach().cpu(), f"{sample_save_dir}/sub2gene.pt")
+                torch.save(probs[i].detach().cpu(), f"{sample_save_dir}/probs.pt")
+                torch.save(labels[i].detach().cpu(), f"{sample_save_dir}/labels.pt")
+
+                logging.info(
+                    f"Epoch {epoch}, Batch {batch_idx}: Saved Gene2Sub, Sub2Gene Attention Weights, "
+                    f"Pathway & Drug Embeddings, Probs, and Labels for sample {sample} to {sample_save_dir}."
+                )
 
     return loss, correct_preds, total_samples, outputs, incorrect_indices
 
@@ -326,10 +336,10 @@ for epoch in range(config['num_epochs']):
                 )
     logging.info(f"Current Learning Rate: {optimizer.param_groups[0]['lr']}, Weight Decay: {optimizer.param_groups[0]['weight_decay']}")
 
-    # logging.info(f"==============Incorrect Samples in Epoch {epoch+1}==============\n"
-    #     f"Incorrect Train Samples : {incorrect_train_samples}"
-    #     f"Incorrect Validation Samples : {incorrect_val_samples}"
-    # )
+    logging.info(f"==============Incorrect Samples in Epoch {epoch+1}==============\n"
+        f"Incorrect Train Samples : {incorrect_train_samples}"
+        f"Incorrect Validation Samples : {incorrect_val_samples}"
+    )
 
     # Save Checkpoint
     if (epoch + 1) % SAVE_INTERVALS == 0:

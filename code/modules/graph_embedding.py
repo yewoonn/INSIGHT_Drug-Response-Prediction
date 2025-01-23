@@ -2,15 +2,16 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.data import Batch
-from torch_geometric.nn import GCNConv, global_mean_pool
+from torch_geometric.nn import SAGEConv, global_mean_pool
+
 
 #  PATHWAY GRAPH EMBEDDING
 class PathwayGraphEmbedding(nn.Module):
     def __init__(self, batch_size, input_dim, hidden_dim, pathway_graphs):
         super(PathwayGraphEmbedding, self).__init__()
         self.batch_size = batch_size
-        self.conv1 = GCNConv(input_dim, hidden_dim)
-        self.conv2 = GCNConv(hidden_dim, hidden_dim)
+        self.conv1 = SAGEConv(in_channels=input_dim, out_channels=hidden_dim)
+        self.conv2 = SAGEConv(in_channels=hidden_dim, out_channels=hidden_dim)
 
         self.cached_batched_graphs = []
         for pathway_graph in pathway_graphs:
@@ -50,8 +51,9 @@ class PathwayGraphEmbedding(nn.Module):
         # 4) 노드 피처 업데이트:  [B, num_nodes, E] -> [B*num_nodes, E]
         batched_graph.x = gene_emb.reshape(-1, gene_emb.size(-1))
 
-        # 5) GCN
-        x = F.relu(self.conv1(batched_graph.x, batched_graph.edge_index))
+        # 5) GraphSage
+        x = self.conv1(batched_graph.x, batched_graph.edge_index)
+        x = F.relu(x)
         x = self.conv2(x, batched_graph.edge_index)
 
         # 6) Global mean pooling
@@ -63,8 +65,8 @@ class PathwayGraphEmbedding(nn.Module):
 class DrugGraphEmbedding(nn.Module):
     def __init__(self, input_dim, hidden_dim):
         super(DrugGraphEmbedding, self).__init__()
-        self.conv1 = GCNConv(input_dim, hidden_dim)
-        self.conv2 = GCNConv(hidden_dim, hidden_dim)
+        self.conv1 = SAGEConv(in_channels=input_dim, out_channels=hidden_dim)
+        self.conv2 = SAGEConv(in_channels=hidden_dim, out_channels=hidden_dim)
 
     def forward(self, drug_graph, sub2gene_out):
         """
@@ -99,7 +101,7 @@ class DrugGraphEmbedding(nn.Module):
         # 3) graph.x에 넣기
         drug_graph.x = cat_node_features.to(device)
 
-        # 4) GCNConv
+        # 4) Graph Sage
         x = self.conv1(drug_graph.x, drug_graph.edge_index)
         x = F.relu(x)
         x = self.conv2(x, drug_graph.edge_index)
