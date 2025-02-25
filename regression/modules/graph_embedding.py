@@ -1,7 +1,8 @@
+import copy
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.data import Batch
+from torch_geometric.data import Batch, Data
 from torch_geometric.nn import SAGEConv, global_mean_pool
 
 
@@ -61,6 +62,65 @@ class PathwayGraphEmbedding(nn.Module):
         graph_embeddings = global_mean_pool(x, batched_graph.batch)  # [B, hidden_dim]
 
         return graph_embeddings
+    
+class UnifiedPathwayGraphEmbedding(nn.Module):
+    def __init__(self, batch_size, input_dim, hidden_dim, base_graphs):
+        super(UnifiedPathwayGraphEmbedding, self).__init__()
+        self.num_pathways = len(base_graphs)
+        self.base_graphs = base_graphs  # 각 pathway의 base graph (Data 객체)
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.batch_size = batch_size
+        self.conv1 = SAGEConv(in_channels=input_dim, out_channels=hidden_dim)
+        self.conv2 = SAGEConv(in_channels=hidden_dim, out_channels=hidden_dim)
+
+        self.prebatched_graph = self.build_prebatched_graph(batch_size)
+
+    def build_prebatched_graph(self, B):
+        data_list = []
+        for i, base_graph in enumerate(self.base_graphs):
+            num_nodes = base_graph.num_nodes
+            for b in range(B):
+                dummy_x = torch.zeros(num_nodes, self.input_dim, dtype=torch.float32)
+                data = Data(x=dummy_x, edge_index=base_graph.edge_index)
+                data_list.append(data)
+
+        batched_graph = Batch.from_data_list(data_list)
+        return batched_graph
+
+    def forward(self, gene2sub_out):
+        device = gene2sub_out.device
+        B, num_pathways, max_gene, emb_dim = gene2sub_out.size()
+
+        if B != self.batch_size:
+            batched_graph = self.build_prebatched_graph(B)
+        else:
+            batched_graph = self.prebatched_graph
+        
+        batched_graph = copy.deepcopy(batched_graph).to(device)
+
+        offset = 0
+        for i, base_graph in enumerate(self.base_graphs):
+            num_nodes = base_graph.num_nodes
+            for b in range(B):
+                # gene2sub_out에서 실제 노드 개수만큼 추출
+                gene_emb = gene2sub_out[b, i, :num_nodes, :]
+                # batched_graph.x[offset : offset + num_nodes] 범위를 gene_emb로 교체
+                batched_graph.x[offset : offset + num_nodes] = gene_emb
+                offset += num_nodes
+
+        # GraphSAGE GNN 적용
+        x = self.conv1(batched_graph.x, batched_graph.edge_index)
+        x = F.relu(x)
+        x = self.conv2(x, batched_graph.edge_index)
+
+        # Global mean pooling
+        graph_emb = global_mean_pool(x, batched_graph.batch)  # [B * Num_Pathways, hidden_dim]
+
+        # [B, Num_Pathways, hidden_dim] 형태로 reshape
+        graph_emb = graph_emb.view(B, num_pathways, self.hidden_dim)
+
+        return graph_emb
 
 #  DRUG GRAPH EMBEDDING
 class DrugGraphEmbedding(nn.Module):

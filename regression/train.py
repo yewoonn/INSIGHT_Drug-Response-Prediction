@@ -23,30 +23,30 @@ os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 
 # Configuration
 config = {
-    'device': torch.device("cuda:0" if torch.cuda.is_available() else "cpu"),
+    'device': torch.device("cuda:1" if torch.cuda.is_available() else "cpu"),
     'batch_size': 16,
     'is_differ' : True,
     'depth' : 2,
     'learning_rate': 0.001,
     'weight_decay': 0.1,
-    'num_epochs': 10,
+    'num_epochs': 1,
     'checkpoint_dir': './checkpoints', # ckpt 디렉토리
     'plot_dir': './plots',
-    'log_interval': 10, # batch 별 log 출력 간격
-    'save_interval': 1, # ckpt 저장할 epoch 간격
+    'log_interval': 1, # batch 별 log 출력 간격
+    'save_interval': 10, # ckpt 저장할 epoch 간격
 }
 
-NUM_CELL_LINES = 708
-NUM_PATHWAYS = 313
+NUM_CELL_LINES = 708 
+NUM_PATHWAYS = 313 
 NUM_GENES = 264 # 고정
-NUM_DRUGS = 308
-NUM_SUBSTRUCTURES = 17 # full: 17 고정
+NUM_DRUGS = 308 
+NUM_SUBSTRUCTURES = 17 # 고정
 
-GENE_EMBEDDING_DIM = 32
+GENE_EMBEDDING_DIM = 8
 SUBSTRUCTURE_EMBEDDING_DIM = 768
-EMBEDDING_DIM = 32
-HIDDEN_DIM = 32
-FINAL_DIM = 16
+EMBEDDING_DIM = 8
+HIDDEN_DIM = 8
+FINAL_DIM = 8
 OUTPUT_DIM = 1
 
 BATCH_SIZE = config['batch_size']
@@ -202,7 +202,7 @@ def process_batch(batch_idx, batch, epoch, model, criterion, device):
     labels = batch['labels'].to(device) # [Batch]
     sample_indices = batch['sample_indices']
 
-    outputs, gene2sub_weights, sub2gene_weights, final_pathway_embedding, final_drug_embedding = model(gene_embeddings, drug_embeddings, drug_graphs, drug_masks)
+    outputs, gene2sub_weights, sub2gene_weights, final_pathway_embedding, final_drug_embedding = model(gene_embeddings, drug_embeddings, drug_graphs, drug_masks)    
     outputs = outputs.squeeze(dim=-1) 
     loss = criterion(outputs, labels) 
 
@@ -234,7 +234,8 @@ def process_batch(batch_idx, batch, epoch, model, criterion, device):
 
 # 4. Training Loop
 train_losses, val_losses = [], []
-train_accuracies, val_accuracies = [], []
+train_rmses, val_rmses = [], []
+
 
 for epoch in range(config['num_epochs']):
     epoch_start = time.time()
@@ -244,23 +245,21 @@ for epoch in range(config['num_epochs']):
     model.train()
     total_train_loss, total_train_rmse = 0, 0
 
-
     for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Train Epoch {epoch+1}")):
         optimizer.zero_grad()
         loss, rmse, _  = process_batch(batch_idx, batch, epoch+1, model, criterion, config['device'])
         loss.backward()
         optimizer.step()
 
-
         total_train_loss += loss.item()
         total_train_rmse += rmse
         if batch_idx % config['log_interval'] == 0:
-            logging.info(f"Batch {batch_idx+1}: Loss: {loss.item():.4f}, ")            
-
+            logging.info(f"Batch {batch_idx+1}: Loss: {loss.item():.4f}, ")   
+         
     train_loss = total_train_loss / len(train_loader)
-    train_rmse = total_train_rmse / len(train_loader)  # RMSE 평균
+    train_rmse = total_train_rmse / len(train_loader)
     train_losses.append(train_loss)
-    train_accuracies.append(train_rmse) 
+    train_rmses.append(train_rmse)
 
     # Validation Phase
     model.eval()
@@ -276,7 +275,7 @@ for epoch in range(config['num_epochs']):
     val_loss = total_val_loss / len(val_loader)
     val_rmse = total_val_rmse / len(val_loader)
     val_losses.append(val_loss)
-    val_accuracies.append(val_rmse) 
+    val_rmses.append(val_rmse)
 
     scheduler.step(val_loss)
 
@@ -297,7 +296,8 @@ for epoch in range(config['num_epochs']):
         }, checkpoint_path)
         logging.info(f"Model checkpoint saved: {checkpoint_path}")
 
-    plot_statics(FILE_NAME, train_losses, val_losses, train_accuracies, val_accuracies) 
+    plot_statics(FILE_NAME, train_losses, val_losses, train_rmses, val_rmses) 
     
-plot_statics(FILE_NAME, train_losses, val_losses, train_accuracies, val_accuracies)
+
+plot_statics(FILE_NAME, train_losses, val_losses, train_rmses, val_rmses)
 logging.info(f"Plots saved in directory Plots.")
