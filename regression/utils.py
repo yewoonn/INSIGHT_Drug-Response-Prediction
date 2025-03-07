@@ -2,7 +2,8 @@ import matplotlib.pyplot as plt
 import os
 import torch
 import gc
-import json
+import numpy as np
+import random
 
 
 def clear_cache():
@@ -56,3 +57,12 @@ def plot_statics(file_name, train_losses, val_losses, train_rmses, val_rmses):
         "Train Accuracy", "Validation Accuracy",
         os.path.join(plot_dir, "accuracy.png")
     )
+
+def set_seed(val):
+    torch.manual_seed(val)
+    torch.cuda.manual_seed(val)
+    torch.cuda.manual_seed_all(val)
+    np.random.seed(val)
+    random.seed(val)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False

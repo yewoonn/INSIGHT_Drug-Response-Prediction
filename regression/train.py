@@ -2,10 +2,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, precision_recall_curve, auc
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 import numpy as np
-import random
 
 import logging
 import time
@@ -15,7 +13,7 @@ import os
 
 from dataset import DrugResponseDataset, collate_fn
 from model import DrugResponseModel
-from utils import plot_statics
+from utils import plot_statics, set_seed
 
 os.environ['TZ'] = 'Asia/Seoul'
 time.tzset()  # Unix 환경에서 적용
@@ -129,10 +127,7 @@ val_dataset = DrugResponseDataset(
 
 # Seed 설정
 seed = 42
-torch.manual_seed(seed)
-np.random.seed(seed)
-random.seed(seed)
-torch.cuda.manual_seed_all(seed)
+set_seed(42)
 
 train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=True, collate_fn=collate_fn)
 val_loader = DataLoader(val_dataset, batch_size=config['batch_size'], shuffle=False, collate_fn=collate_fn)
@@ -181,17 +176,17 @@ scheduler = ReduceLROnPlateau(
     verbose=True
 )
 
-# 저장할 샘플
-target_samples = {
-    ('DATA.684052', 'BORTEZOMIB'),
-    ('DATA.688001', 'BORTEZOMIB'),
-    ('DATA.684062', 'BORTEZOMIB'),
-    ('DATA.688023', 'BORTEZOMIB'),
-    ('DATA.688001', 'PACLITAXEL'),
-    ('DATA.684052', 'PACLITAXEL'),
-    ('DATA.684062', 'PACLITAXEL'),
-    ('DATA.688023', 'PACLITAXEL'),
-}
+# # 저장할 샘플
+# target_samples = {
+#     ('DATA.684052', 'BORTEZOMIB'),
+#     ('DATA.688001', 'BORTEZOMIB'),
+#     ('DATA.684062', 'BORTEZOMIB'),
+#     ('DATA.688023', 'BORTEZOMIB'),
+#     ('DATA.688001', 'PACLITAXEL'),
+#     ('DATA.684052', 'PACLITAXEL'),
+#     ('DATA.684062', 'PACLITAXEL'),
+#     ('DATA.688023', 'PACLITAXEL'),
+# }
 
 # 3. Helper Function
 def process_batch(batch_idx, batch, epoch, model, criterion, device):
@@ -208,7 +203,7 @@ def process_batch(batch_idx, batch, epoch, model, criterion, device):
 
     rmse = torch.sqrt(loss).item()  # RMSE 계산
 
-
+    # Epoch
     if epoch % SAVE_INTERVALS == 0:
         save_dir = f"{attn_dir}/epoch_{epoch}"
         os.makedirs(save_dir, exist_ok=True)
@@ -216,19 +211,19 @@ def process_batch(batch_idx, batch, epoch, model, criterion, device):
         torch.save(final_drug_embedding.detach().cpu(), f"{save_dir}/B{batch_idx}_drug_embedding.pt")
         torch.save(sample_indices, f"{save_dir}/B{batch_idx}_samples.pt")
 
-        for i, sample in enumerate(sample_indices):
-            if sample in target_samples:  # Check if sample is in the target list
-                sample_save_dir = f"{save_dir}/sample_{sample[0]}_{sample[1]}"
-                os.makedirs(sample_save_dir, exist_ok=True)
+        # for i, sample in enumerate(sample_indices):
+        #     if sample in target_samples:  # Check if sample is in the target list
+        #         sample_save_dir = f"{save_dir}/sample_{sample[0]}_{sample[1]}"
+        #         os.makedirs(sample_save_dir, exist_ok=True)
 
-                torch.save(gene2sub_weights[i].detach().cpu(), f"{sample_save_dir}/gene2sub.pt")
-                torch.save(sub2gene_weights[i].detach().cpu(), f"{sample_save_dir}/sub2gene.pt")
-                torch.save(labels[i].detach().cpu(), f"{sample_save_dir}/labels.pt")
+        #         torch.save(gene2sub_weights[i].detach().cpu(), f"{sample_save_dir}/gene2sub.pt")
+        #         torch.save(sub2gene_weights[i].detach().cpu(), f"{sample_save_dir}/sub2gene.pt")
+        #         torch.save(labels[i].detach().cpu(), f"{sample_save_dir}/labels.pt")
 
-                logging.info(
-                    f"Epoch {epoch}, Batch {batch_idx}: Saved Gene2Sub, Sub2Gene Attention Weights, "
-                    f"Pathway & Drug Embeddings, Probs, and Labels for sample {sample} to {sample_save_dir}."
-                )
+        #         logging.info(
+        #             f"Epoch {epoch}, Batch {batch_idx}: Saved Gene2Sub, Sub2Gene Attention Weights, "
+        #             f"Pathway & Drug Embeddings, Probs, and Labels for sample {sample} to {sample_save_dir}."
+        #         )
 
     return loss, rmse, sample_indices
 

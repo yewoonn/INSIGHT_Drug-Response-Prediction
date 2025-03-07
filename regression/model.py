@@ -9,11 +9,12 @@ from modules.graph_embedding import PathwayGraphEmbedding, DrugGraphEmbedding
 
 #  DRUG RESPONSE MODEL
 class DrugResponseModel(nn.Module):
-    def __init__(self, pathway_graphs, pathway_masks, num_pathways, num_genes, num_substructures, gene_dim, substructure_dim, embedding_dim, hidden_dim, final_dim, output_dim, batch_size, is_differ, depth, save_intervals, file_name):
+    def __init__(self, pathway_graphs, pathway_masks, num_pathways, num_genes, num_substructures, gene_dim, substructure_dim, embedding_dim, hidden_dim, final_dim, output_dim, batch_size, is_differ, depth, save_intervals, file_name, device):
         super(DrugResponseModel, self).__init__()
         self.num_pathways = num_pathways
         self.save_intervals = save_intervals
         self.file_name = file_name
+        self.device = device
         
         self.pathway_masks = pathway_masks # [Pathway_num, Max_Gene]
 
@@ -28,7 +29,7 @@ class DrugResponseModel(nn.Module):
             self.Gene2Sub_cross_attention = Gene2SubCrossAttn(gene_dim, substructure_dim)
             self.Sub2Gene_cross_attention = Sub2GeneCrossAttn(substructure_dim, gene_dim)
         
-        self.pathway_graph = PathwayGraphEmbedding(batch_size, embedding_dim, hidden_dim, pathway_graphs)
+        self.pathway_graph = PathwayGraphEmbedding(batch_size, embedding_dim, hidden_dim, pathway_graphs, device)
         self.drug_graph = DrugGraphEmbedding(embedding_dim, hidden_dim)
 
         self.fc1 = nn.Linear(embedding_dim + hidden_dim, final_dim)
