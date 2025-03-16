@@ -80,7 +80,7 @@ anlz_drugs = [
 ]
 
 # 디렉터리 설정
-epoch1_dir = "/regression/weights/20250314_13/epoch_1"
+epoch1_dir = "regression/weights/20250314_13/epoch_1"
 epoch50_dir = "regression/weights/20250314_13/epoch_50"
 
 # Tissue별 고정 색상 (Plotly용)
