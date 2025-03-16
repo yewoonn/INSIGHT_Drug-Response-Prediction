@@ -34,11 +34,11 @@ config = {
     'save_interval': 10, # ckpt 저장할 epoch 간격
 }
 
-NUM_CELL_LINES = 708 
-NUM_PATHWAYS = 313 
-NUM_GENES = 264 # 고정
-NUM_DRUGS = 308 
-NUM_SUBSTRUCTURES = 17 # 고정
+NUM_CELL_LINES = 965 
+NUM_PATHWAYS = 314
+NUM_GENES = 264 # Max
+NUM_DRUGS = 270
+NUM_SUBSTRUCTURES = 17 # Max
 
 GENE_EMBEDDING_DIM = 8
 SUBSTRUCTURE_EMBEDDING_DIM = 768
@@ -52,6 +52,7 @@ IS_DIFFER = config['is_differ']
 DEPTH = config['depth']
 
 FILE_NAME = datetime.now().strftime('%Y%m%d_%H')
+DEVICE = config['device']
 SAVE_INTERVALS = config['save_interval']
 
 log_filename = f"log/train/{FILE_NAME}.log"
@@ -152,7 +153,8 @@ model = DrugResponseModel(
     is_differ = IS_DIFFER, 
     depth = DEPTH, 
     save_intervals = SAVE_INTERVALS, 
-    file_name = FILE_NAME
+    file_name = FILE_NAME,
+    device = DEVICE
 )
 
 logging.info(f"Initial GPU memory usage (before moving model to device): "
@@ -231,10 +233,18 @@ def process_batch(batch_idx, batch, epoch, model, criterion, device):
 train_losses, val_losses = [], []
 train_rmses, val_rmses = [], []
 
+# 결과 저장 폴더 생성
+result_dir = os.path.join("results", FILE_NAME)
+os.makedirs(result_dir, exist_ok=True)
+os.makedirs(chpt_dir, exist_ok=True)  # Checkpoints 저장할 디렉토리 생성
 
+# with prof:
 for epoch in range(config['num_epochs']):
     epoch_start = time.time()
     logging.info(f"Epoch [{epoch+1}/{config['num_epochs']}] started.")
+
+    train_actuals, train_predictions, train_drug_labels = [], [], []
+    val_actuals, val_predictions, val_drug_labels = [], [], []
 
     # Training Phase
     model.train()
@@ -242,30 +252,54 @@ for epoch in range(config['num_epochs']):
 
     for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Train Epoch {epoch+1}")):
         optimizer.zero_grad()
-        loss, rmse, _  = process_batch(batch_idx, batch, epoch+1, model, criterion, config['device'])
+        loss, rmse, outputs  = process_batch(batch_idx, batch, epoch+1, model, criterion, config['device'])
         loss.backward()
         optimizer.step()
 
         total_train_loss += loss.item()
         total_train_rmse += rmse
+
         if batch_idx % config['log_interval'] == 0:
             logging.info(f"Batch {batch_idx+1}: Loss: {loss.item():.4f}, ")   
-         
+
+     # 예측값 저장
+        labels = batch['labels'].cpu().numpy()
+        if isinstance(outputs, torch.Tensor):
+            outputs = outputs.detach().cpu().numpy()
+        else:
+            outputs = np.array(outputs)
+        drug_labels = [sample[1] for sample in batch['sample_indices']]
+
+        train_actuals.extend(labels)
+        train_predictions.extend(outputs)
+        train_drug_labels.extend(drug_labels)
+
     train_loss = total_train_loss / len(train_loader)
-    train_rmse = total_train_rmse / len(train_loader)
+    train_rmse = total_train_rmse / len(train_loader)  # RMSE 평균
     train_losses.append(train_loss)
     train_rmses.append(train_rmse)
 
-    # Validation Phase
+     # Validation Phase
     model.eval()
     total_val_loss, total_val_rmse = 0, 0
 
     with torch.no_grad():
         for batch in tqdm(val_loader, desc=f"Validation Epoch {epoch+1}"):
-            loss, rmse, _ = process_batch(batch_idx, batch, epoch+1, model, criterion, config['device'])
-    
+            loss, rmse, outputs = process_batch(batch_idx, batch, epoch+1, model, criterion, config['device'])
+
             total_val_loss += loss.item()
             total_val_rmse += rmse
+
+            labels = batch['labels'].cpu().numpy()
+            if isinstance(outputs, torch.Tensor):
+                outputs = outputs.detach().cpu().numpy()
+            else:
+                outputs = np.array(outputs)
+            drug_labels = [sample[1] for sample in batch['sample_indices']]
+
+            val_actuals.extend(labels)
+            val_predictions.extend(outputs)
+            val_drug_labels.extend(drug_labels)
 
     val_loss = total_val_loss / len(val_loader)
     val_rmse = total_val_rmse / len(val_loader)
@@ -279,20 +313,34 @@ for epoch in range(config['num_epochs']):
                  f"Val Loss: {val_loss:.4f}, Val RMSE: {val_rmse:.4f}\n"
     )
 
-    # Save Checkpoint
-    if (epoch + 1) % SAVE_INTERVALS == 0:
-        checkpoint_path = f"{chpt_dir}/ckpt_epoch_{epoch+1}.pth" 
-        torch.save({
-            'epoch': epoch + 1,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'train_loss': train_loss,
-            'val_loss': val_loss,
-        }, checkpoint_path)
-        logging.info(f"Model checkpoint saved: {checkpoint_path}")
+    # Checkpoints 저장 (매 Epoch 저장)
+    checkpoint_path = f"{chpt_dir}/epoch_{epoch+1}.pth"
+    torch.save({
+        'epoch': epoch + 1,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'train_loss': train_loss,
+        'val_loss': val_loss,
+    }, checkpoint_path)
+    logging.info(f"Checkpoint saved at {checkpoint_path}")
 
-    plot_statics(FILE_NAME, train_losses, val_losses, train_rmses, val_rmses) 
+    # 결과 저장 (에폭마다 다른 파일명 사용)
+    torch.save({
+        "actuals": train_actuals,
+        "predictions": train_predictions,
+        "drug_labels": train_drug_labels
+    }, os.path.join(result_dir, f"train_results_epoch_{epoch+1}.pt"))
+
+    torch.save({
+        "actuals": val_actuals,
+        "predictions": val_predictions,
+        "drug_labels": val_drug_labels
+    }, os.path.join(result_dir, f"val_results_epoch_{epoch+1}.pt"))
+
+    logging.info(f"Results saved for epoch {epoch+1} in directory {result_dir}")
+
+    plot_statics(os.path.join(result_dir, FILE_NAME), train_losses, val_losses, train_rmses, val_rmses)
     
-
-plot_statics(FILE_NAME, train_losses, val_losses, train_rmses, val_rmses)
-logging.info(f"Plots saved in directory Plots.")
+# Loss 및 RMSE 그래프 저장
+plot_statics(os.path.join(result_dir, FILE_NAME), train_losses, val_losses, train_rmses, val_rmses)
+logging.info(f"Plots saved in directory {result_dir}")

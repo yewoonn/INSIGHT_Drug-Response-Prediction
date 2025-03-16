@@ -44,18 +44,18 @@ def plot_statics(file_name, train_losses, val_losses, train_rmses, val_rmses):
     save_plot(
         range(1, len(train_losses) + 1),  # x 값으로 epoch 범위 설정
         train_losses, val_losses,
-        "Training and Validation Loss", "Epoch", "Loss",
-        "Train Loss", "Validation Loss",
-        os.path.join(plot_dir, "loss.png")
+        "Training and Validation MSE", "Epoch", "MSE",
+        "Train MSE", "Validation MSE",
+        os.path.join(plot_dir, "MSE.png")
     )
     
     # Accuracy Plot
     save_plot(
         range(1, len(train_rmses) + 1),  # x 값으로 epoch 범위 설정
         train_rmses, val_rmses,
-        "Training and Validation Accuracy", "Epoch", "Accuracy",
-        "Train Accuracy", "Validation Accuracy",
-        os.path.join(plot_dir, "accuracy.png")
+        "Training and Validation RMSE", "Epoch", "RMSE",
+        "Train RMSE", "Validation RMSE",
+        os.path.join(plot_dir, "RMSE.png")
     )
 
 def set_seed(val):
