@@ -287,12 +287,12 @@ st.title("UMAP Visualization by Date")
 # 날짜(또는 에폭)별 디렉터리 매핑
 # 원하는 만큼 추가할 수 있습니다.
 directories = {
-    "# Bug Fixed": "/regression/weights/20250317_14/epoch_1",
-    "# Bug Fixed": "/regression/weights/20250317_14/epoch_15",
-    "# Layer Norm Before Concat": "/regression/weights/20250318_18/epoch_1",
-    "# Layer Norm Before Concat": "/regression/weights/20250318_18/epoch_15",
-    "# Layer Norm After Concat" : "/regression/weights/20250320_16/epoch_1",
-    "# Layer Norm After Concat" : "/regression/weights/20250320_16/epoch_11"
+    "# Bug Fixed": "regression/weights/20250317_14/epoch_1",
+    "# Bug Fixed": "regression/weights/20250317_14/epoch_15",
+    "# Layer Norm Before Concat": "regression/weights/20250318_18/epoch_1",
+    "# Layer Norm Before Concat": "regression/weights/20250318_18/epoch_15",
+    "# Layer Norm After Concat" : "regression/weights/20250320_16/epoch_1",
+    "# Layer Norm After Concat" : "regression/weights/20250320_16/epoch_11"
 }
 
 # 각 날짜별로 플롯 출력
