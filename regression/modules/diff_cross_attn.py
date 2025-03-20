@@ -5,17 +5,81 @@ import math
 
 from modules.rms_norm import RMSNorm
  
-# SOFTMAX
+#  DIFFERENTIAL CROSS-ATTENTION
+class DifferCrossAttn(nn.Module):
+    def __init__(self, embed_dim: int, depth: int = 0):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.head_dim = embed_dim // 2
+        self.scaling = self.head_dim ** -0.5
+
+        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=False)  # (E -> E)
+        self.k_proj = nn.Linear(embed_dim, embed_dim, bias=False)  # (E -> E)
+        self.v_proj = nn.Linear(embed_dim, embed_dim, bias=False)  # (E -> E)
+        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=False)
+
+        self.lambda_init = 0.8 - 0.6 * math.exp(-0.3 * depth)
+
+        self.lambda_q1 = nn.Parameter(torch.zeros(self.head_dim).normal_(mean=0, std=0.1))
+        self.lambda_k1 = nn.Parameter(torch.zeros(self.head_dim).normal_(mean=0, std=0.1))
+        self.lambda_q2 = nn.Parameter(torch.zeros(self.head_dim).normal_(mean=0, std=0.1))
+        self.lambda_k2 = nn.Parameter(torch.zeros(self.head_dim).normal_(mean=0, std=0.1))
+
+        self.subln = RMSNorm(2 * self.head_dim, eps=1e-5, elementwise_affine=True)
+
+    def forward(self, gene: torch.Tensor, substructure: torch.Tensor) -> torch.Tensor:
+        bsz, n_gene, _ = gene.size()
+        _, n_sub,  _ = substructure.size()
+
+        # 1) Q, K, V 구하기 (Cross Attention)
+        q = self.q_proj(gene)              # (B, n_gene, E)
+        k = self.k_proj(substructure)      # (B, n_sub,  E)
+        v = self.v_proj(substructure)      # (B, n_sub,  E)
+
+        # 2) Q, K -> [2, head_dim], V -> [2 * head_dim]
+        q = q.view(bsz, n_gene, 2, self.head_dim)   # (B, n_gene, 2, head_dim)
+        k = k.view(bsz, n_sub,  2, self.head_dim)   # (B, n_sub,  2, head_dim)
+        v = v.view(bsz, n_sub,  2 * self.head_dim)  # (B, n_sub,  2 * head_dim)
+
+        # 3) matmul 위해 transpose (slot 차원을 두 번째로)
+        q = q.transpose(1, 2)  # (B, 2, n_gene, head_dim)
+        k = k.transpose(1, 2)  # (B, 2, n_sub,  head_dim)
+        v = v.unsqueeze(1)     # (B, 1, n_sub, 2*head_dim)
+
+        q = q * self.scaling
+
+        # 4) attention score = Q @ K^T
+        #    => (B, 2, n_gene, head_dim) x (B, 2, head_dim, n_sub) = (B, 2, n_gene, n_sub)
+        attn_weights = torch.matmul(q, k.transpose(-1, -2))  # (B, 2, n_gene, n_sub)
+        attn_weights = F.softmax(attn_weights, dim=-1)  # (B, 2, n_gene, n_sub)
+
+        lambda_1 = torch.exp(torch.sum(self.lambda_q1 * self.lambda_k1, dim=-1))
+        lambda_2 = torch.exp(torch.sum(self.lambda_q2 * self.lambda_k2, dim=-1))
+        lambda_full = lambda_1 - lambda_2 + self.lambda_init
+
+        # 5) 두 슬롯(0, 1) 간 차이를 내어 최종 attn_weights 계산
+        diff_attn_weights = attn_weights[:, 0] - lambda_full * attn_weights[:, 1]  # (B, n_gene, n_sub)
+        diff_attn = diff_attn_weights.unsqueeze(1)  # (B, 1, n_gene, n_sub)
+
+        attn_output = torch.matmul(diff_attn, v)
+        attn_output = self.subln(attn_output)               # (B, 1, n_gene, 2*head_dim)
+        attn_output = attn_output * (1.0 - self.lambda_init)
+        attn_output = attn_output.squeeze(1)                # (B, n_gene, 2*head_dim)
+        out = self.out_proj(attn_output)                    # (B, n_gene, E)
+
+        return out, diff_attn_weights
+    
+
 def eps_softmax(x, dim, eps=1e-8):
     x_exp = torch.exp(x)
-    x_exp_sum = x_exp.sum(dim=dim, keepdim=True) + eps  
+    x_exp_sum = x_exp.sum(dim=dim, keepdim=True) + eps  # Add epsilon to the denominator
     return x_exp / x_exp_sum
 
 def stable_softmax(x, dim, eps=1e-8):
     # dim을 따라 최대값을 빼줌으로써 수치적 안정성 확보
     x_max, _ = torch.max(x, dim=dim, keepdim=True)
     x_exp = torch.exp(x - x_max)
-    x_exp_sum = x_exp.sum(dim=dim, keepdim=True) + eps  
+    x_exp_sum = x_exp.sum(dim=dim, keepdim=True) + eps  # 분모에 epsilon을 추가
     return x_exp / x_exp_sum
 
 #  GENE2SUB DIFFERENTIAL CROSS-ATTENTION
@@ -77,23 +141,27 @@ class Gene2SubDifferCrossAttn(nn.Module):
         attn_scores = torch.matmul(Q, K.transpose(-1, -2))  # [B, 2, L, head_dim] x [B, 2, head_dim, S] => [B, 2, L, S]
 
         if (query_mask is not None) and (key_mask is not None):
-            query_mask = query_mask.to(torch.bool)
-            key_mask = key_mask.to(torch.bool)
+            query_mask = query_mask.to(dtype=torch.bool, device=query.device)
+            key_mask = key_mask.to(dtype=torch.bool, device=query.device)
 
             # QUERY MASKING
-            query_mask = query_mask.to(query.device)
             query_mask_flat = query_mask.view(B, L)  # [B, P, G] => [B, L]
             query_extended_mask = query_mask_flat.unsqueeze(1).unsqueeze(-1)  # [B, 1, L, 1]
-            attn_scores = attn_scores.masked_fill(~query_extended_mask, -1e20)
 
             # KEY MASKING
-            key_mask = key_mask.to(query.device)
             key_extended_mask = key_mask.unsqueeze(1).unsqueeze(1) # [B, S] => [B, 1, 1, S]
-            attn_scores = attn_scores.masked_fill(~key_extended_mask, -1e20)
+
+            combined_mask = query_extended_mask & key_extended_mask
+            attn_scores = attn_scores.masked_fill(~combined_mask, -1e20)
 
         # Softmax
         # attn_scores = F.softmax(attn_scores, dim=-1)  # [B, 2, L, S]
         attn_scores = stable_softmax(attn_scores, dim=-1)
+
+        if torch.isnan(attn_scores).any():
+            print("after soft) NaN found")
+            print("gene_embed : ", attn_scores)
+            raise ValueError(f"Still NaN in gene_emb after slice: shape={attn_scores.shape}")
 
         # Calculate Difference Between Two Slots
         lambda_1 = torch.exp(torch.sum(self.lambda_q1 * self.lambda_k1, dim=-1))
@@ -185,19 +253,22 @@ class Sub2GeneDifferCrossAttn(nn.Module):
         attn_scores = torch.matmul(Q, K.transpose(-1, -2))  # [B, 2, S, head_dim] x [B, 2, head_dim, L] => [B, 2, S, L]
 
         if (query_mask is not None) and (key_mask is not None):
+            query_mask = query_mask.to(dtype=torch.bool, device=query.device)  # [B, S]
+            key_mask = key_mask.to(dtype=torch.bool, device=query.device)      # [B, P, G]
+
             # QUERY MASKING            
-            query_mask = query_mask.to(query.device) # [B, S]
             query_extended_mask = query_mask.unsqueeze(1).unsqueeze(-1)  # [B, 1, S, 1]
-            attn_scores = attn_scores.masked_fill(~query_extended_mask, -1e20)
 
             # KEY MASKING
-            key_mask = key_mask.to(query.device)  # [B, P, G]
             key_mask_flat = key_mask.view(B, L)   # [B, L]
             key_extended_mask = key_mask_flat.unsqueeze(1).unsqueeze(1)  # [B, 1, 1, L]
-            attn_scores = attn_scores.masked_fill(~key_extended_mask, -1e20)
+
+            combined_mask = query_extended_mask & key_extended_mask
+            attn_scores = attn_scores.masked_fill(~combined_mask, -1e20)
 
         # Softmax
-        attn_scores = stable_softmax(attn_scores, dim=-1) # [B, 2, S, L]
+        # attn_scores = F.softmax(attn_scores, dim=-1)  # [B, 2, S, L]
+        attn_scores = stable_softmax(attn_scores, dim=-1)
 
         # Calculate Difference Between Two Slots
         lambda_1 = torch.exp(torch.sum(self.lambda_q1 * self.lambda_k1, dim=-1))

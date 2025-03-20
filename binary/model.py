@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-# import torch.nn.functional as F
+import torch.nn.functional as F
 import time
 
 from modules.embedding_layer import GeneEmbeddingLayer, OneHotSubstructureEmbeddingLayer, ChemBERTSubstructureEmbeddingLayer
@@ -80,8 +80,8 @@ class DrugResponseModel(nn.Module):
         combined_embedding = torch.cat((final_pathway_embedding, final_drug_embedding), dim=-1)  # [B, Dg + H]
 
         x = self.fc1(combined_embedding)
-        # x = self.bn_fc1(x)  # BatchNorm 적용
-        # x = F.relu(x)
+        x = self.bn_fc1(x)  # BatchNorm 적용
+        x = F.relu(x)
         x = self.fc2(x)
 
         return x, gene2sub_weights, sub2gene_weights, final_pathway_embedding, final_drug_embedding

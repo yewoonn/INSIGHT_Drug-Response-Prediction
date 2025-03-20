@@ -24,7 +24,7 @@ class GeneEmbeddingLayer(nn.Module):
 
         return embedded_values
 
-#  One-Hot SUBSTRUCTURE EMBEDDING LAYERS
+#  SUBSTRUCTURE EMBEDDING LAYERS
 class OneHotSubstructureEmbeddingLayer(nn.Module):
     # In)  [BATCH_SIZE, NUM_SUBSTRUCTURES]
     # Out) [BATCH_SIZE, NUM_SUBSTRUCTURES, SUBSTRUCTURES_EMBEDDING_DIM]
@@ -46,7 +46,8 @@ class OneHotSubstructureEmbeddingLayer(nn.Module):
 
         return embeddings 
     
-#  ChemBERTa SUBSTRUCTURE EMBEDDING LAYERS
+
+# After Cross Attn
 class ChemBERTSubstructureEmbeddingLayer(nn.Module):
     # In)  [BATCH_SIZE, NUM_SUBSTRUCTURES, 768]
     # Out) [BATCH_SIZE, NUM_SUBSTRUCTURES, SUBSTRUCTURES_EMBEDDING_DIM]

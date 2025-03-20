@@ -1,11 +1,13 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from torch.profiler import record_function
 import time
 
 from modules.embedding_layer import GeneEmbeddingLayer, OneHotSubstructureEmbeddingLayer, ChemBERTSubstructureEmbeddingLayer
 from modules.cross_attn import Gene2SubCrossAttn, Sub2GeneCrossAttn
 from modules.diff_cross_attn import Gene2SubDifferCrossAttn, Sub2GeneDifferCrossAttn
-from modules.graph_embedding import PathwayGraphEmbedding, DrugGraphEmbedding
+from modules.graph_embedding import PathwayGraphEmbedding, UnifiedPathwayGraphEmbedding, DrugGraphEmbedding
 
 #  DRUG RESPONSE MODEL
 class DrugResponseModel(nn.Module):
@@ -29,10 +31,11 @@ class DrugResponseModel(nn.Module):
             self.Gene2Sub_cross_attention = Gene2SubCrossAttn(gene_dim, substructure_dim)
             self.Sub2Gene_cross_attention = Sub2GeneCrossAttn(substructure_dim, gene_dim)
         
-        self.pathway_graph = PathwayGraphEmbedding(batch_size, embedding_dim, hidden_dim, pathway_graphs, device)
+        self.pathway_graph = UnifiedPathwayGraphEmbedding(batch_size, embedding_dim, hidden_dim, pathway_graphs, device)
         self.drug_graph = DrugGraphEmbedding(embedding_dim, hidden_dim)
 
         self.fc1 = nn.Linear(embedding_dim + hidden_dim, final_dim)
+        self.bn_fc1 = nn.BatchNorm1d(final_dim)
         self.fc2 = nn.Linear(final_dim, output_dim)
 
     def forward(self, gene_embeddings, drug_embeddings, drug_graphs, drug_masks):
@@ -43,7 +46,7 @@ class DrugResponseModel(nn.Module):
 
         # Gene and Substructure Embeddings
         gene_embeddings = self.gene_embedding_layer(gene_embeddings)  # [Batch, Pathway_num, Max_Gene, Embedding_dim]
-  
+
         # Gene2Sub Cross Attention
         # Out) [Batch, Pathway_num, Max_Gene, Embedding_dim], Weight) [Batch, Pathway_num, Max_Gene, Max_Sub]
         gene2sub_out, gene2sub_weights = self.Gene2Sub_cross_attention(
@@ -62,15 +65,10 @@ class DrugResponseModel(nn.Module):
             key_mask = pathway_masks             # [Batch, Pathway_num, Max_Gene]
         )
 
-        sub2gene_out = self.substructure_embedding_layer(drug_embeddings) # [Batch, Max_Sub, Embedding_dim]
+        sub2gene_out = self.substructure_embedding_layer(sub2gene_out) 
 
         # Pathway Graph Embedding
-        pathway_graph_embeddings = []
-        for i in range(self.num_pathways):
-            gene_emb = gene2sub_out[:, i, :, :]
-            graph_emb = self.pathway_graph(gene_emb, i)
-            pathway_graph_embeddings.append(graph_emb)
-        pathway_graph_embedding = torch.stack(pathway_graph_embeddings, dim=1) # [Batch, Num_Pathways, Embedding_dim]]
+        pathway_graph_embedding = self.pathway_graph(gene2sub_out) # [Batch, Num_Pathways, Embedding_dim]
 
         # Drug Graph Embedding
         drug_graph_embedding = self.drug_graph(drug_graphs, sub2gene_out) # [Batch, Embedding_dim]
@@ -83,6 +81,8 @@ class DrugResponseModel(nn.Module):
         combined_embedding = torch.cat((final_pathway_embedding, final_drug_embedding), dim=-1)  # [B, Dg + H]
 
         x = self.fc1(combined_embedding)
+        x = self.bn_fc1(x)  # BatchNorm 적용
+        x = F.relu(x)
         x = self.fc2(x)
 
         return x, gene2sub_weights, sub2gene_weights, final_pathway_embedding, final_drug_embedding
