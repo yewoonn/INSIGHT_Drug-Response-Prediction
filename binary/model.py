@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import time
 
-from modules.embedding_layer import GeneEmbeddingLayer, OneHotSubstructureEmbeddingLayer, ChemBERTSubstructureEmbeddingLayer
+from modules.embedding_layer import GeneEmbeddingLayer, ChemBERTSubstructureEmbeddingLayer
 from modules.cross_attn import Gene2SubCrossAttn, Sub2GeneCrossAttn
 from modules.diff_cross_attn import Gene2SubDifferCrossAttn, Sub2GeneDifferCrossAttn
 from modules.graph_embedding import PathwayGraphEmbedding, UnifiedPathwayGraphEmbedding, DrugGraphEmbedding
@@ -33,7 +33,6 @@ class DrugResponseModel(nn.Module):
         self.drug_graph = DrugGraphEmbedding(embedding_dim, hidden_dim)
 
         self.fc1 = nn.Linear(embedding_dim + hidden_dim, final_dim)
-        # self.bn_fc1 = nn.BatchNorm1d(final_dim)
         self.fc2 = nn.Linear(final_dim, output_dim)
 
     def forward(self, gene_embeddings, drug_embeddings, drug_graphs, drug_masks):
@@ -80,8 +79,6 @@ class DrugResponseModel(nn.Module):
         combined_embedding = torch.cat((final_pathway_embedding, final_drug_embedding), dim=-1)  # [B, Dg + H]
 
         x = self.fc1(combined_embedding)
-        x = self.bn_fc1(x)  # BatchNorm 적용
-        x = F.relu(x)
         x = self.fc2(x)
 
         return x, gene2sub_weights, sub2gene_weights, final_pathway_embedding, final_drug_embedding

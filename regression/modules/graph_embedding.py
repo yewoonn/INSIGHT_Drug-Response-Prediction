@@ -4,15 +4,17 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.data import Batch, Data
 from torch_geometric.nn import SAGEConv, global_mean_pool
+from torch_geometric.utils import get_laplacian
+from torch_sparse import spmm
 
 
-#  PATHWAY GRAPH EMBEDDING
-class PathwayGraphEmbedding(nn.Module):
-    def __init__(self, batch_size, input_dim, hidden_dim, pathway_graphs):
-        super(PathwayGraphEmbedding, self).__init__()
+#  PATHWAY GRAPH EMBEDDING (Individual GNN)
+class IndividualPathwayGraphEmbedding(nn.Module):
+    def __init__(self, batch_size, input_dim, graph_dim, pathway_graphs):
+        super(IndividualPathwayGraphEmbedding, self).__init__()
         self.batch_size = batch_size
-        self.conv1 = SAGEConv(in_channels=input_dim, out_channels=hidden_dim)
-        self.conv2 = SAGEConv(in_channels=hidden_dim, out_channels=hidden_dim)
+        self.conv1 = SAGEConv(in_channels=input_dim, out_channels=graph_dim)
+        self.conv2 = SAGEConv(in_channels=graph_dim, out_channels=graph_dim)
 
         self.cached_batched_graphs = []
         for pathway_graph in pathway_graphs:
@@ -55,35 +57,34 @@ class PathwayGraphEmbedding(nn.Module):
 
         # 5) GraphSage
         x = self.conv1(batched_graph.x, batched_graph.edge_index)
-        x = F.relu(x)
+        x = F.gelu(x)
         x = self.conv2(x, batched_graph.edge_index)
 
         # 6) Global mean pooling
-        graph_embeddings = global_mean_pool(x, batched_graph.batch)  # [B, hidden_dim]
+        graph_embeddings = global_mean_pool(x, batched_graph.batch)  # [B, graph_dim]
 
         return graph_embeddings
     
-class UnifiedPathwayGraphEmbedding(nn.Module):
-    def __init__(self, batch_size, input_dim, hidden_dim, base_graphs, device):
-        super(UnifiedPathwayGraphEmbedding, self).__init__()
+# PATHWAY GRAPH EMBEDDING (Unified GNN)
+class PathwayGraphEmbedding(nn.Module):
+    def __init__(self, batch_size, input_dim, graph_dim, base_graphs, device):
+        super(PathwayGraphEmbedding, self).__init__()
         self.num_pathways = len(base_graphs)
         self.base_graphs = base_graphs  # 각 pathway의 base graph
         self.input_dim = input_dim
-        self.hidden_dim = hidden_dim
+        self.graph_dim = graph_dim
         self.batch_size = batch_size
         self.device = device
-        self.conv1 = SAGEConv(in_channels=input_dim, out_channels=hidden_dim).to(self.device)
-        self.conv2 = SAGEConv(in_channels=hidden_dim, out_channels=hidden_dim).to(self.device)
-
-        self.prebatched_graph = self.build_prebatched_graph(batch_size)
+        # self.conv1 = SAGEConv(in_channels=input_dim * 2, out_channels=graph_dim).to(self.device) # (주석 해제)
+        self.conv1 = SAGEConv(in_channels=input_dim, out_channels=graph_dim).to(self.device) # (주석 처리)
+        self.conv2 = SAGEConv(in_channels=graph_dim, out_channels=graph_dim).to(self.device)
 
     def build_prebatched_graph(self, B):
         data_list = []
-        for i, base_graph in enumerate(self.base_graphs):
+        for base_graph in self.base_graphs:
             for b in range(B):
                 data = Data(x=base_graph.x, edge_index=base_graph.edge_index)
                 data_list.append(data)
-
         batched_graph = Batch.from_data_list(data_list)
         return batched_graph
 
@@ -93,81 +94,74 @@ class UnifiedPathwayGraphEmbedding(nn.Module):
 
         batched_graph = self.build_prebatched_graph(B).to(self.device)
 
-        if B != self.batch_size:
-            batched_graph = self.build_prebatched_graph(B) # Batch Size 다른 경우
-        else:
-            batched_graph = self.prebatched_graph # Batch Size 일치한 경우
-        
-        # batched_graph 복사
-        batched_graph = copy.deepcopy(batched_graph).to(self.device)
-
-        # batched_graph의 노드 피처 업데이트
+        # 노드 피처 업데이트
         offset = 0
+        x = batched_graph.x.clone()
         for i, base_graph in enumerate(self.base_graphs):
             num_nodes = base_graph.num_nodes
             for b in range(B):
-                # gene2sub_out에서 노드 개수만큼 추출 후 변경
                 gene_emb = gene2sub_out[b, i, :num_nodes, :]
                 batched_graph.x[offset : offset + num_nodes] = gene_emb
                 offset += num_nodes
-        
+        batched_graph.x = x
+
+        # (주석 해제) 라플라시안 연산: L @ x
+        # edge_index, edge_weight = get_laplacian(batched_graph.edge_index, normalization='sym', num_nodes=x.size(0))
+        # lap_x = spmm(edge_index, edge_weight, x.size(0), x.size(0), x)  # [N, emb_dim]
+        # x_combined = torch.cat([x, lap_x], dim=-1)  # [N, emb_dim * 2]
+        # x = self.conv1(x_combined, batched_graph.edge_index)
+
         # GraphSAGE GNN 적용
-        x = self.conv1(batched_graph.x, batched_graph.edge_index)
-        x = F.relu(x)
+        x = self.conv1(batched_graph.x, batched_graph.edge_index) # (주석 처리)
+        x = F.gelu(x)
         x = self.conv2(x, batched_graph.edge_index)
 
         # Global mean pooling
-        graph_emb = global_mean_pool(x, batched_graph.batch)  # [B * Num_Pathways, hidden_dim]
-        graph_emb = graph_emb.view(B, num_pathways, self.hidden_dim) # [B, Num_Pathways, hidden_dim]
+        graph_emb = global_mean_pool(x, batched_graph.batch)  # [B * Num_Pathways, graph_dim]
+        graph_emb = graph_emb.view(B, num_pathways, self.graph_dim) # [B, Num_Pathways, graph_dim]
 
         return graph_emb
 
 #  DRUG GRAPH EMBEDDING
 class DrugGraphEmbedding(nn.Module):
-    def __init__(self, input_dim, hidden_dim):
+    def __init__(self, input_dim, graph_dim):
         super(DrugGraphEmbedding, self).__init__()
-        self.conv1 = SAGEConv(in_channels=input_dim, out_channels=hidden_dim)
-        self.conv2 = SAGEConv(in_channels=hidden_dim, out_channels=hidden_dim)
+        # self.conv1 = SAGEConv(in_channels=input_dim * 2, out_channels=graph_dim) # (주석 해제)
+        self.conv1 = SAGEConv(in_channels=input_dim, out_channels=graph_dim) # (주석 처리)
+        self.conv2 = SAGEConv(in_channels=graph_dim, out_channels=graph_dim)
 
     def forward(self, drug_graph, sub2gene_out):
         """
         Args:
             drug_graph (Batch): Batched PyG Data object (each sample is a drug graph).
             sub2gene_out (Tensor): [BATCH_SIZE, MAX_SUBSTRUCTURES, EMBEDDING_DIM]
-                - 패딩(또는 NaN)이 있을 수 있음. 
-                - 각 batch 샘플별 실제 유효 substructure 개수는 mapped_num_subs[b].
             mapped_num_subs (list[int]): 각 배치마다 "유효 substructure 노드" 수.
-                - drug_graph 내부에서도 sample b의 node 수가 동일해야 함 (graph[b].num_nodes)
         """
         device = sub2gene_out.device
         B = sub2gene_out.size(0)
 
-        # 1) 노드 피처 합치기
+        # 노드 피처 업데이트
         all_node_features = []
         for b in range(B):
-            # 이 배치 샘플의 실제 substructure node 수
             num_nodes_b = drug_graph[b].num_nodes
-            # sub2gene_out[b, :num_nodes_b, :] 를 추출
             emb_b = sub2gene_out[b, :num_nodes_b, :]  # [num_nodes_b, E]
-
-            if torch.isnan(emb_b).any():
-                print("NaN found")
-                raise ValueError(f"NaN found in sub2gene_out for batch={b}.")
-
             all_node_features.append(emb_b)
 
-        # 2) cat => shape: [ (sum of all num_nodes_b), E ]
         cat_node_features = torch.cat(all_node_features, dim=0)
-
-        # 3) graph.x에 넣기
         drug_graph.x = cat_node_features.to(device)
 
-        # 4) Graph Sage
-        x = self.conv1(drug_graph.x, drug_graph.edge_index)
-        x = F.relu(x)
+        # (주석 해제) 라플라시안 연산: L @ x
+        # edge_index, edge_weight = get_laplacian(drug_graph.edge_index, normalization='sym', num_nodes=drug_graph.x.size(0))
+        # lap_x = spmm(edge_index, edge_weight, drug_graph.x.size(0), drug_graph.x.size(0), drug_graph.x)
+        # x_combined = torch.cat([drug_graph.x, lap_x], dim=-1)
+        # x = self.conv1(x_combined, drug_graph.edge_index)
+
+        # Graph Sage
+        x = self.conv1(drug_graph.x, drug_graph.edge_index) # (주석 처리)
+        x = F.gelu(x)
         x = self.conv2(x, drug_graph.edge_index)
 
-        # 5) global mean pooling
-        graph_embedding = global_mean_pool(x, drug_graph.batch)  # [B, hidden_dim]
+        # global mean pooling
+        graph_embedding = global_mean_pool(x, drug_graph.batch)  # [B, graph_dim]
 
         return graph_embedding
