@@ -8,7 +8,7 @@ from modules.graph_embedding import PathwayGraphEmbedding, DrugGraphEmbedding
 
 #  DRUG RESPONSE MODEL
 class DrugResponseModel(nn.Module):
-    def __init__(self, pathway_graphs, pathway_masks, num_pathways, num_genes, num_substructures, gene_layer_dim, substructure_layer_dim, graph_dim, cross_attn_dim, final_dim, output_dim, batch_size, depth, save_intervals, file_name, device):
+    def __init__(self, pathway_graphs, pathway_masks, num_pathways, gene_layer_dim, substructure_layer_dim, graph_dim, cross_attn_dim, final_dim, output_dim, batch_size, depth, save_intervals, file_name, device):
         super(DrugResponseModel, self).__init__()
         self.num_pathways = num_pathways
         self.save_intervals = save_intervals
@@ -27,7 +27,7 @@ class DrugResponseModel(nn.Module):
         self.drug_graph = DrugGraphEmbedding(cross_attn_dim, graph_dim)
 
         self.fc1 = nn.Linear(2 * graph_dim, final_dim)
-        # self.bn_fc1 = nn.BatchNorm1d(final_dim)
+        self.bn_fc1 = nn.BatchNorm1d(final_dim)
         self.fc2 = nn.Linear(final_dim, output_dim)
 
     def forward(self, gene_embeddings, drug_embeddings, drug_graphs, drug_masks):
@@ -66,15 +66,15 @@ class DrugResponseModel(nn.Module):
         drug_graph_embedding = self.drug_graph(drug_graphs, sub2gene_out) # [Batch, Graph_dim]
 
         # Final Embedding
-        final_pathway_embedding = torch.mean(pathway_graph_embedding, dim=1)  # [Batch, Graph_dim]
+        final_pathway_embedding, _ = torch.max(pathway_graph_embedding, dim=1)  # [Batch, Graph_dim]
         final_drug_embedding = drug_graph_embedding
 
         # Concatenate and Predict
         combined_embedding = torch.cat((final_pathway_embedding, final_drug_embedding), dim=-1)  # [Batch, Graph_dim * 2]
 
         x = self.fc1(combined_embedding)
-        # x = self.bn_fc1(x)  # BatchNorm 적용
-        # x = F.relu(x)
+        x = self.bn_fc1(x)  # BatchNorm 적용
+        x = F.relu(x)
         x = self.fc2(x)  # [Batch, output_dim]
         
         return x, gene2sub_weights, sub2gene_weights, final_pathway_embedding, final_drug_embedding

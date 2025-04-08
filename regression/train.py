@@ -4,6 +4,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 import numpy as np
 import random
+from scipy.stats import spearmanr, pearsonr
 
 import logging
 import time
@@ -126,7 +127,7 @@ val_dataset = DrugResponseDataset(
 seed = 42
 set_seed(42)
 
-train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=True, collate_fn=collate_fn) ###### TRUE로 수정하기 !!!!!
+train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=True, collate_fn=collate_fn)
 val_loader = DataLoader(val_dataset, batch_size=config['batch_size'], shuffle=False, collate_fn=collate_fn)
 
 pathway_graphs = torch.load('./input_0307/pathway_graphs.pt')
@@ -136,9 +137,7 @@ pathway_masks = torch.load('./input_0307/pathway_mask.pt')
 model = DrugResponseModel(
     pathway_graphs = pathway_graphs, 
     pathway_masks = pathway_masks,
-    num_pathways = NUM_PATHWAYS, 
-    num_genes = NUM_MAX_GENES, 
-    num_substructures = NUM_MAX_SUBSTRUCTURES, 
+    num_pathways = NUM_PATHWAYS,
     gene_layer_dim = GENE_LAYER_EMBEDDING_DIM, 
     substructure_layer_dim = SUBSTRUCTURE_LAYER_EMBEDDING_DIM, 
     cross_attn_dim = CROSS_ATTN_EMBEDDING_DIM, 
@@ -232,7 +231,7 @@ for epoch in range(config['num_epochs']):
     train_losses.append(train_loss)
     train_rmses.append(train_rmse)
 
-         # Validation Phase
+    # Validation Phase
     model.eval()
     total_val_loss, total_val_rmse = 0, 0
 
@@ -250,10 +249,21 @@ for epoch in range(config['num_epochs']):
     val_losses.append(val_loss)
     val_rmses.append(val_rmse)
 
+        # SCC/PCC 계산
+    train_actuals_np = torch.stack(train_actuals).cpu().numpy()
+    train_predictions_np = torch.stack(train_predictions).detach().cpu().numpy()
+    val_actuals_np = torch.stack(val_actuals).cpu().numpy()
+    val_predictions_np = torch.stack(val_predictions).detach().cpu().numpy()
+
+    train_pcc = pearsonr(train_actuals_np, train_predictions_np)[0]
+    train_scc = spearmanr(train_actuals_np, train_predictions_np)[0]
+    val_pcc = pearsonr(val_actuals_np, val_predictions_np)[0]
+    val_scc = spearmanr(val_actuals_np, val_predictions_np)[0]
+
     # scheduler.step(val_loss)
-    logging.info(f"Epoch [{epoch+1}/{config['num_epochs']}] completed. "
-                 f"Train Loss: {train_loss:.4f}, Train RMSE: {train_rmse:.4f}, "
-                 f"Val Loss: {val_loss:.4f}, Val RMSE: {val_rmse:.4f}\n"
+    logging.info(f"Epoch [{epoch+1}/{config['num_epochs']}] completed. \n"
+                 f"Train Loss: {train_loss:.4f}, Train RMSE: {train_rmse:.4f}, Train PCC: {train_pcc:.4f}, Train SCC: {train_scc:.4f},\n"
+                 f"Val Loss: {val_loss:.4f}, Val RMSE: {val_rmse:.4f} Val PCC: {val_pcc:.4f}, Val SCC: {val_scc:.4f} \n"
     )
 
     # Checkpoints 저장 (매 Epoch 저장)

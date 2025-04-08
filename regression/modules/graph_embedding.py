@@ -75,8 +75,7 @@ class PathwayGraphEmbedding(nn.Module):
         self.graph_dim = graph_dim
         self.batch_size = batch_size
         self.device = device
-        # self.conv1 = SAGEConv(in_channels=input_dim * 2, out_channels=graph_dim).to(self.device) # (주석 해제)
-        self.conv1 = SAGEConv(in_channels=input_dim, out_channels=graph_dim).to(self.device) # (주석 처리)
+        self.conv1 = SAGEConv(in_channels=input_dim * 2, out_channels=graph_dim).to(self.device)
         self.conv2 = SAGEConv(in_channels=graph_dim, out_channels=graph_dim).to(self.device)
 
     def build_prebatched_graph(self, B):
@@ -103,13 +102,12 @@ class PathwayGraphEmbedding(nn.Module):
                 gene_emb = gene2sub_out[b, i, :num_nodes, :]
                 batched_graph.x[offset : offset + num_nodes] = gene_emb
                 offset += num_nodes
-        batched_graph.x = x
 
-        # (주석 해제) 라플라시안 연산: L @ x
-        # edge_index, edge_weight = get_laplacian(batched_graph.edge_index, normalization='sym', num_nodes=x.size(0))
-        # lap_x = spmm(edge_index, edge_weight, x.size(0), x.size(0), x)  # [N, emb_dim]
-        # x_combined = torch.cat([x, lap_x], dim=-1)  # [N, emb_dim * 2]
-        # x = self.conv1(x_combined, batched_graph.edge_index)
+        # 라플라시안 연산: L @ x
+        edge_index, edge_weight = get_laplacian(batched_graph.edge_index, normalization='sym', num_nodes=x.size(0))
+        lap_x = spmm(edge_index, edge_weight, x.size(0), x.size(0), x)  # [N, emb_dim]
+        x_combined = torch.cat([x, lap_x], dim=-1)  # [N, emb_dim * 2]
+        x = self.conv1(x_combined, batched_graph.edge_index)
 
         # GraphSAGE GNN 적용
         x = self.conv1(batched_graph.x, batched_graph.edge_index) # (주석 처리)
@@ -126,8 +124,7 @@ class PathwayGraphEmbedding(nn.Module):
 class DrugGraphEmbedding(nn.Module):
     def __init__(self, input_dim, graph_dim):
         super(DrugGraphEmbedding, self).__init__()
-        # self.conv1 = SAGEConv(in_channels=input_dim * 2, out_channels=graph_dim) # (주석 해제)
-        self.conv1 = SAGEConv(in_channels=input_dim, out_channels=graph_dim) # (주석 처리)
+        self.conv1 = SAGEConv(in_channels=input_dim * 2, out_channels=graph_dim) 
         self.conv2 = SAGEConv(in_channels=graph_dim, out_channels=graph_dim)
 
     def forward(self, drug_graph, sub2gene_out):
@@ -150,11 +147,11 @@ class DrugGraphEmbedding(nn.Module):
         cat_node_features = torch.cat(all_node_features, dim=0)
         drug_graph.x = cat_node_features.to(device)
 
-        # (주석 해제) 라플라시안 연산: L @ x
-        # edge_index, edge_weight = get_laplacian(drug_graph.edge_index, normalization='sym', num_nodes=drug_graph.x.size(0))
-        # lap_x = spmm(edge_index, edge_weight, drug_graph.x.size(0), drug_graph.x.size(0), drug_graph.x)
-        # x_combined = torch.cat([drug_graph.x, lap_x], dim=-1)
-        # x = self.conv1(x_combined, drug_graph.edge_index)
+        # 라플라시안 연산: L @ x
+        edge_index, edge_weight = get_laplacian(drug_graph.edge_index, normalization='sym', num_nodes=drug_graph.x.size(0))
+        lap_x = spmm(edge_index, edge_weight, drug_graph.x.size(0), drug_graph.x.size(0), drug_graph.x)
+        x_combined = torch.cat([drug_graph.x, lap_x], dim=-1)
+        x = self.conv1(x_combined, drug_graph.edge_index)
 
         # Graph Sage
         x = self.conv1(drug_graph.x, drug_graph.edge_index) # (주석 처리)
