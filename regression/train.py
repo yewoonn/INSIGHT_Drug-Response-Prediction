@@ -33,11 +33,8 @@ config = {
     'save_interval': 1, # ckpt 저장할 epoch 간격
 }
 
-NUM_CELL_LINES = 964
+
 NUM_PATHWAYS = 314
-NUM_MAX_GENES = 264 # Max
-NUM_DRUGS = 270
-NUM_MAX_SUBSTRUCTURES = 17 # Max
 
 GENE_LAYER_EMBEDDING_DIM = 8 # input dim
 SUBSTRUCTURE_LAYER_EMBEDDING_DIM = 768 # input dim
@@ -71,13 +68,6 @@ logging.basicConfig(
     ]
 )
 
-logging.info(
-    "Model Configuration and Parameters: "
-    f"  NUM_CELL_LINES: {NUM_CELL_LINES} "
-    f"  NUM_PATHWAYS: {NUM_PATHWAYS} "
-    f"  NUM_GENES: {NUM_MAX_GENES} "
-    f"  NUM_DRUGS: {NUM_DRUGS} "
-    f"  NUM_SUBSTRUCTURES: {NUM_MAX_SUBSTRUCTURES}")
 logging.info(
     "Embedding Dimensions and Hidden Layers: "
     f"  GENE_EMBEDDING_DIM: {GENE_LAYER_EMBEDDING_DIM} "
@@ -249,7 +239,7 @@ for epoch in range(config['num_epochs']):
     val_losses.append(val_loss)
     val_rmses.append(val_rmse)
 
-        # SCC/PCC 계산
+    # SCC/PCC 계산
     train_actuals_np = torch.stack(train_actuals).cpu().numpy()
     train_predictions_np = torch.stack(train_predictions).detach().cpu().numpy()
     val_actuals_np = torch.stack(val_actuals).cpu().numpy()

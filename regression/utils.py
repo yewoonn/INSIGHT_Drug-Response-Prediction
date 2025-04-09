@@ -66,3 +66,15 @@ def set_seed(val):
     random.seed(val)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+
+
+def plot_predictions(y_true, y_pred, save_path):
+    plt.figure(figsize=(6,6))
+    plt.scatter(y_true, y_pred, alpha=0.6)
+    plt.plot([min(y_true), max(y_true)], [min(y_true), max(y_true)], 'r--')
+    plt.xlabel("Actual Values")
+    plt.ylabel("Predicted Values")
+    plt.title("Actual vs Predicted")
+    plt.grid(True)
+    plt.savefig(save_path)
+    plt.close()
