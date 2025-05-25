@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 
 class RMSNorm(nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-6, elementwise_affine=True, memory_efficient=False):
+    def __init__(self, dim: int, eps: float = 1e-6, elementwise_affine=True):
         super().__init__()
         self.dim = dim
         self.eps = eps
@@ -15,10 +15,16 @@ class RMSNorm(nn.Module):
     def _norm(self, x):
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
+    # def forward(self, x):
+    #     output = self._norm(x.float()).type_as(x)
+    #     if self.weight is not None:
+    #         output = output * self.weight
+    #     return output
+    
     def forward(self, x):
-        output = self._norm(x.float()).type_as(x)
+        output = self._norm(x)  # ❌ float() 제거
         if self.weight is not None:
-            output = output * self.weight
+            output = output * self.weight.to(x.dtype)  # dtype 일치
         return output
 
     def extra_repr(self) -> str:

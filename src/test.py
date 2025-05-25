@@ -14,33 +14,29 @@ from datetime import datetime
 from dataset import DrugResponseDataset, collate_fn
 from model import DrugResponseModel
 from utils import set_seed
+MAX_GENE_SLOTS = 218  # 실제 사용하는 값으로 설정 (이전 로그 기반)
+MAX_DRUG_SUBSTRUCTURES = 17 # 실제 사용하는 값으로 설정 (이전 로그 기반, collate_fn에서 패딩 후의 크기)
 
 # Configuration
 config = {
     'device': torch.device("cuda:0" if torch.cuda.is_available() else "cpu"),
-    'batch_size': 16,
-    'checkpoint_path': './checkpoints/20250408_15/epoch_10.pth',
-    'test_data_path': './dataset_full_0307_LN/test_dataset.pt',
+    'batch_size': 32,
+    'checkpoint_path': './checkpoints/20250521_14/best_model.pth',
+    'test_data_path': './dataset_full_CV_6&7/test_dataset.pt',
 }
 
 # Model Parameters
-
-NUM_PATHWAYS = 314
-
-GENE_LAYER_EMBEDDING_DIM = 32 # input dim
-SUBSTRUCTURE_LAYER_EMBEDDING_DIM = 768 # input dim
-CROSS_ATTN_EMBEDDING_DIM = 32
-GRAPH_EMBEDDING_DIM = 128
-FINAL_EMBEDDING_DIM = 256
-HIDDEN_DIM = 128
-OUTPUT_DIM = 1
+GENE_LAYER_EMBEDDING_DIM = 64 # input dim
+SUBSTRUCTURE_LAYER_EMBEDDING_DIM = 64 # input dim
+CROSS_ATTN_EMBEDDING_DIM = 64
+FINAL_EMBEDDING_DIM = 128
+HIDDEN_DIM = 32
 DEPTH = 2
 
 BATCH_SIZE = config['batch_size']
 FILE_NAME = f"test_{datetime.now().strftime('%Y%m%d_%H')}"
 RESULT_DIR = f"results/{FILE_NAME}"
 os.makedirs(RESULT_DIR, exist_ok=True)
-
 
 
 # Logger 설정
@@ -58,11 +54,10 @@ logging.info("Starting regression test script.")
 set_seed(42)
 
 # 1. Load Test Dataset
-test_data = torch.load(config['test_data_path'])
+test_data = torch.load(config['test_data_path'], weights_only=False)
 test_dataset = DrugResponseDataset(
     gene_embeddings=test_data['gene_embeddings'],
     drug_embeddings=test_data['drug_embeddings'],
-    drug_graphs=test_data['drug_graphs'],
     drug_masks=test_data['drug_masks'],
     labels=test_data['labels'],
     sample_indices=test_data['sample_indices']
@@ -70,25 +65,17 @@ test_dataset = DrugResponseDataset(
 test_loader = DataLoader(test_dataset, batch_size=config['batch_size'], shuffle=False, collate_fn=collate_fn)
 
 # 2. Load Pathway Info
-pathway_graphs = torch.load('./input_0307/pathway_graphs_32.pt')
-pathway_masks = torch.load('./input_0307/pathway_mask.pt')
+pathway_masks = torch.load('./input/pathway_mask.pt')
 
 # 3. Initialize Model
 model = DrugResponseModel(
-    pathway_graphs=pathway_graphs,
     pathway_masks=pathway_masks,
-    num_pathways=NUM_PATHWAYS,
     gene_layer_dim=GENE_LAYER_EMBEDDING_DIM,
     substructure_layer_dim=SUBSTRUCTURE_LAYER_EMBEDDING_DIM,
     cross_attn_dim=CROSS_ATTN_EMBEDDING_DIM,
-    graph_dim=GRAPH_EMBEDDING_DIM,
     final_dim=FINAL_EMBEDDING_DIM,
-    output_dim=OUTPUT_DIM,
-    batch_size=BATCH_SIZE,
-    depth=DEPTH,
-    save_intervals=10,
-    file_name=FILE_NAME,
-    device=config['device']
+    max_gene_slots=MAX_GENE_SLOTS, # <<< 전달
+    max_drug_substructures=MAX_DRUG_SUBSTRUCTURES # <<< 전달
 )
 
 # Load Checkpoint
@@ -113,13 +100,12 @@ def test_model():
         for batch_idx, batch in enumerate(tqdm(test_loader, desc="Testing")):
             gene_embeddings = batch['gene_embeddings'].to(config['device'])
             drug_embeddings = batch['drug_embeddings'].to(config['device'])
-            drug_graphs = batch['drug_graphs'].to(config['device'])
             drug_masks = batch['drug_masks'].to(config['device'])
             labels = batch['labels'].to(config['device'])
             sample_indices = batch['sample_indices']
 
             outputs, gene2sub_weights, sub2gene_weights, final_pathway_embedding, final_drug_embedding = model(
-                gene_embeddings, drug_embeddings, drug_graphs, drug_masks)
+                gene_embeddings, drug_embeddings, drug_masks)
             outputs = outputs.squeeze(dim=-1)
 
             loss = criterion(outputs, labels)
@@ -130,12 +116,12 @@ def test_model():
             predictions.extend(outputs.cpu().numpy())
             sample_indices_all.extend(sample_indices)
 
-            # attention weight 저장
-            torch.save(gene2sub_weights.cpu(), os.path.join(attn_dir, f"B{batch_idx}_gene2sub.pt"))
-            torch.save(sub2gene_weights.cpu(), os.path.join(attn_dir, f"B{batch_idx}_sub2gene.pt"))
-            torch.save(final_pathway_embedding.cpu(), os.path.join(attn_dir, f"B{batch_idx}_pathway.pt"))
-            torch.save(final_drug_embedding.cpu(), os.path.join(attn_dir, f"B{batch_idx}_drug.pt"))
-            torch.save(sample_indices, os.path.join(attn_dir, f"B{batch_idx}_samples.pt"))
+            # # attention weight 저장
+            # torch.save(gene2sub_weights.cpu(), os.path.join(attn_dir, f"B{batch_idx}_gene2sub.pt"))
+            # torch.save(sub2gene_weights.cpu(), os.path.join(attn_dir, f"B{batch_idx}_sub2gene.pt"))
+            # torch.save(final_pathway_embedding.cpu(), os.path.join(attn_dir, f"B{batch_idx}_pathway.pt"))
+            # torch.save(final_drug_embedding.cpu(), os.path.join(attn_dir, f"B{batch_idx}_drug.pt"))
+            # torch.save(sample_indices, os.path.join(attn_dir, f"B{batch_idx}_samples.pt"))
 
 
     actuals = np.array(actuals)

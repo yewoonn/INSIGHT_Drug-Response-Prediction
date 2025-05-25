@@ -5,7 +5,6 @@ import gc
 import numpy as np
 import random
 
-
 def clear_cache():
     torch.cuda.empty_cache()
     gc.collect()  # Python의 Garbage Collector 호출
