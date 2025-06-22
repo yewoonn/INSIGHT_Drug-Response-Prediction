@@ -8,47 +8,68 @@ import time
 from tqdm import tqdm
 from datetime import datetime
 import os
+import yaml
+import argparse
 from dataset import DrugResponseDataset, collate_fn
 from model import DrugResponseModel
 from utils import plot_statics, set_seed
+import shutil
 
-os.environ['TZ'] = 'Asia/Seoul'
+# Parse command line
+def parse_args():
+    parser = argparse.ArgumentParser(description='Drug Response Prediction Training')
+    parser.add_argument('--config', type=str, default='config.yml', 
+                       help='Path to configuration file (default: config.yml)')
+    return parser.parse_args()
+
+# Load configuration
+def load_config(config_path='config.yml'):
+    with open(config_path, 'r', encoding='utf-8') as file:
+        config = yaml.safe_load(file)
+    return config
+
+args = parse_args()
+config = load_config(args.config)
+
+os.environ['TZ'] = config['system']['timezone']
 time.tzset()
-os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = config['system']['pytorch_cuda_alloc_conf']
 
-# Configuration
-config = {
-    'device': torch.device("cuda:0" if torch.cuda.is_available() else "cpu"),
-    'batch_size': 4,
-    'depth' : 2,
-    'learning_rate': 0.0001,
-    'num_epochs': 100,
-    'early_stopping_patience': 5,
-    'checkpoint_dir': './checkpoints',
-    'plot_dir': './plots',
-    'log_interval': 50,
-    'save_interval': 100,
-}
+# Fixed directory paths
+CHECKPOINT_DIR = "./checkpoints"
+PLOT_DIR = "./plots"
+LOG_DIR = "log/train"
+WEIGHTS_DIR = "weights"
+PREDICTION_DIR = "predictions"
 
-MAX_GENE_SLOTS = 218  # 유전자 최대 개수
-MAX_DRUG_SUBSTRUCTURES = 17 # 하위구조 최대 개수
-GENE_LAYER_EMBEDDING_DIM = 64
-SUBSTRUCTURE_LAYER_EMBEDDING_DIM = 64
-CROSS_ATTN_EMBEDDING_DIM = 64
-FINAL_EMBEDDING_DIM = 128
-OUTPUT_DIM = 1
+device = config['training']['device']
+if device == "cuda:0" and not torch.cuda.is_available():
+    device = "cpu"
+config['training']['device'] = torch.device(device)
 
-BATCH_SIZE = config['batch_size']
+# Extract parameters
+training_config = config['training']
+save_config = config['save']
+model_config = config['model']
+data_config = config['data']
+system_config = config['system']
+
+MAX_GENE_SLOTS = model_config['max_gene_slots']
+MAX_DRUG_SUBSTRUCTURES = model_config['max_drug_substructures']
+GENE_LAYER_EMBEDDING_DIM = model_config['gene_layer_embedding_dim']
+SUBSTRUCTURE_LAYER_EMBEDDING_DIM = model_config['substructure_layer_embedding_dim']
+CROSS_ATTN_EMBEDDING_DIM = model_config['cross_attn_embedding_dim']
+FINAL_EMBEDDING_DIM = model_config['final_embedding_dim']
+OUTPUT_DIM = model_config['output_dim']
+
+BATCH_SIZE = training_config['batch_size']
 FILE_NAME = datetime.now().strftime('%Y%m%d_%H')
-DEVICE = config['device']
-SAVE_INTERVALS = config['save_interval']
+DEVICE = training_config['device']
+SAVE_FOLD_NUMBER = save_config['save_fold_number'] 
 
-log_filename = f"log/train/{FILE_NAME}.log"
-chpt_dir = f"{config['checkpoint_dir']}/{FILE_NAME}"
+log_filename = f"{LOG_DIR}/{FILE_NAME}.log"
+chpt_dir = f"{CHECKPOINT_DIR}/{FILE_NAME}"
 os.makedirs(chpt_dir, exist_ok=True)
-
-attn_dir = f"weights/{FILE_NAME}"
-os.makedirs(attn_dir, exist_ok=True)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -68,21 +89,20 @@ logging.info(
 logging.info(
     "Training Configuration: "
     f"  BATCH_SIZE: {BATCH_SIZE} "
-    f"  Learning Rate: {config['learning_rate']} "
-    f"  Number of Epochs: {config['num_epochs']} "
+    f"  Learning Rate: {training_config['learning_rate']} "
+    f"  Number of Epochs: {training_config['num_epochs']} "
 )
 logging.info(f"CUDA is available: {torch.cuda.is_available()}")
 
 # Seed Setting
-seed = 42
-set_seed(42)
+set_seed(system_config['seed'])
 
 # Common Data Load
-pathway_masks = torch.load('./input/pathway_mask.pt')
-pathway_laplacian_embeddings = torch.load('./input/pathway_laplacian_embeddings_4.pt') 
+pathway_masks = torch.load(data_config['pathway_mask_path'])
+pathway_laplacian_embeddings = torch.load(data_config['pathway_laplacian_embeddings_path'])
 
 # Helper Function
-def process_batch(batch_idx, batch, epoch, model, criterion, device, mode="train"):
+def process_batch(batch_idx, batch, epoch, model, criterion, device, mode="train", is_best_epoch=False, save_weights=False, save_dir_root=None):
     gene_embeddings = batch['gene_embeddings'].to(device) # [Batch, Pathway_num, Max_Gene]
     drug_embeddings = batch['drug_embeddings'].to(device) # [Batch, Max_Sub]
     drug_spectral_embeddings = batch['drug_spectral_embeddings'].to(device) # [Batch, Max_Sub]
@@ -96,39 +116,36 @@ def process_batch(batch_idx, batch, epoch, model, criterion, device, mode="train
 
     rmse = torch.sqrt(loss).item()  
 
-    if mode == "train" and (epoch % SAVE_INTERVALS == 0):
-        save_dir = f"{attn_dir}/epoch_{epoch}"
+    # Save weights
+    if mode == "train" and save_weights and save_config['isSave']:
+        save_dir = f"{save_dir_root}/current_epoch"
         os.makedirs(save_dir, exist_ok=True)
         torch.save(gene2sub_weights.detach().cpu(), f"{save_dir}/B{batch_idx}_gene2sub_weight.pt")
         torch.save(sub2gene_weights.detach().cpu(), f"{save_dir}/B{batch_idx}_sub2gene_weight.pt")
-        torch.save(final_pathway_embedding.detach().cpu(), f"{save_dir}/B{batch_idx}_pathway_embedding.pt")
-        torch.save(final_drug_embedding.detach().cpu(), f"{save_dir}/B{batch_idx}_drug_embedding.pt")
+        # torch.save(final_pathway_embedding.detach().cpu(), f"{save_dir}/B{batch_idx}_pathway_embedding.pt")
+        # torch.save(final_drug_embedding.detach().cpu(), f"{save_dir}/B{batch_idx}_drug_embedding.pt")
         torch.save(sample_indices, f"{save_dir}/B{batch_idx}_samples.pt") # (세포주, 약물)
 
     return outputs, loss, rmse, sample_indices, labels
 
 # 5-Fold Cross-Validation
-best_val_rmse_overall = float('inf')
-best_checkpoint_overall = None
-best_fold_id = None
-
 for fold in range(1, 6):
     logging.info(f"🚩 Starting Fold {fold}")
 
     # Fold Directory Setting
     fold_checkpoint_dir = f"{chpt_dir}/fold_{fold}"
-    fold_result_dir = f"results_cv/{FILE_NAME}/fold_{fold}"
-    attn_dir = f"weights/{FILE_NAME}/fold_{fold}"
+    fold_result_dir = f"{PREDICTION_DIR}/{FILE_NAME}/fold_{fold}"
+    fold_attn_dir = f"{WEIGHTS_DIR}/{FILE_NAME}/fold_{fold}"
     os.makedirs(fold_checkpoint_dir, exist_ok=True)
     os.makedirs(fold_result_dir, exist_ok=True)
-    os.makedirs(attn_dir, exist_ok=True)
+    os.makedirs(fold_attn_dir, exist_ok=True)
     
     # Fold Data Load & Init Model
-    fold_data = torch.load(f'../0_dataset_CV_laplacian/cross_valid_fold_{fold}.pt')
+    fold_data = torch.load(f'{data_config["cross_validation_data_dir"]}/cross_valid_fold_{fold}.pt')
     train_dataset = DrugResponseDataset(**fold_data['train'])
     val_dataset = DrugResponseDataset(**fold_data['validation'])
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn)
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn, num_workers=4, pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn, num_workers=4, pin_memory=True)
     
     model = DrugResponseModel(
         pathway_masks=pathway_masks,
@@ -141,66 +158,62 @@ for fold in range(1, 6):
         max_drug_substructures=MAX_DRUG_SUBSTRUCTURES 
     ).to(DEVICE)
     criterion = nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'])
+    optimizer = optim.Adam(model.parameters(), lr=training_config['learning_rate'])
     
     # Training Loop
-    train_losses, val_losses = [], []
     train_rmses, val_rmses = [], []
 
     best_val_rmse = float('inf')
     patience_counter = 0
 
-    for epoch in range(config['num_epochs']):
+    for epoch in range(training_config['num_epochs']):
         epoch_start = time.time()
-        logging.info(f"Epoch [{epoch+1}/{config['num_epochs']}] started.")
+        logging.info(f"Epoch [{epoch+1}/{training_config['num_epochs']}] started.")
 
         train_actuals, train_predictions, train_samples = [], [], []
         val_actuals, val_predictions, val_samples = [], [], []
 
         # Training Phase
         model.train()
-        total_train_loss, total_train_rmse = 0, 0
+        total_train_se, total_train_samples = 0, 0
 
         for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Train Epoch {epoch+1}")):
             optimizer.zero_grad()
-            outputs, loss, rmse, sample_indices, labels  = process_batch(batch_idx, batch, epoch+1, model, criterion, config['device'], mode="train")
+            save_weights_this_epoch = (fold == SAVE_FOLD_NUMBER) and (epoch + 1 >= 40) and save_config['isSave'] # After 40 Epochs, Specific Fold for File Memorization Save
+            outputs, loss, rmse, sample_indices, labels  = process_batch(batch_idx, batch, epoch+1, model, criterion, DEVICE, mode="train", is_best_epoch=False, save_weights=save_weights_this_epoch, save_dir_root=fold_attn_dir)
             loss.backward()
             optimizer.step()
 
-            total_train_loss += loss.item()
-            total_train_rmse += rmse
+            se = ((outputs.detach() - labels.detach()) ** 2).sum()
+            total_train_se += se.item()
+            total_train_samples += labels.numel()
 
-            if batch_idx % config['log_interval'] == 0:
-                    logging.info(f"Batch {batch_idx+1}: Loss: {loss.item():.4f}, ")   
-
-            train_actuals.extend(labels) # Labels
-            train_predictions.extend(outputs) # Predictions
+            train_actuals.extend(labels.detach().cpu()) # Labels
+            train_predictions.extend(outputs.detach().cpu()) # Predictions
             train_samples.extend(sample_indices) # Samples
 
-        train_loss = total_train_loss / len(train_loader)
-        train_rmse = total_train_rmse / len(train_loader) 
-        train_losses.append(train_loss)
+        train_rmse = (total_train_se / total_train_samples) ** 0.5         
         train_rmses.append(train_rmse)
 
         # Validation Phase
         model.eval()
-        total_val_loss, total_val_rmse = 0, 0
+        total_val_se, total_val_samples = 0, 0
 
         with torch.no_grad():
-            for batch in tqdm(val_loader, desc=f"Validation Epoch {epoch+1}"):
-                outputs, loss, rmse, sample_indices, labels = process_batch(batch_idx, batch, epoch+1, model, criterion, config['device'], mode="val")
-                total_val_loss += loss.item()
-                total_val_rmse += rmse
-                val_actuals.extend(labels)
-                val_predictions.extend(outputs)
+            for val_idx, batch in tqdm(val_loader, desc=f"Validation Epoch {epoch+1}"):
+                outputs, loss, rmse, sample_indices, labels = process_batch(val_idx, batch, epoch+1, model, criterion, DEVICE, mode="val", is_best_epoch=False, save_weights=False)
+                se = ((outputs.detach() - labels.detach()) ** 2).sum()
+                total_val_se += se.item()
+                total_val_samples += labels.numel()
+
+                val_actuals.extend(labels.detach().cpu())
+                val_predictions.extend(outputs.detach().cpu())
                 val_samples.extend(sample_indices)
 
-        val_loss = total_val_loss / len(val_loader)
-        val_rmse = total_val_rmse / len(val_loader)
-        val_losses.append(val_loss)
+        val_rmse = (total_val_se / total_val_samples) ** 0.5         
         val_rmses.append(val_rmse)
 
-        # SCC/PCC 계산
+        # SCC/PCC
         train_actuals_np = torch.stack(train_actuals).cpu().numpy()
         train_predictions_np = torch.stack(train_predictions).detach().cpu().numpy()
         val_actuals_np = torch.stack(val_actuals).cpu().numpy()
@@ -211,60 +224,150 @@ for fold in range(1, 6):
         val_pcc = pearsonr(val_actuals_np, val_predictions_np)[0]
         val_scc = spearmanr(val_actuals_np, val_predictions_np)[0]
 
-        logging.info(f"Fold {fold} Epoch [{epoch+1}/{config['num_epochs']}] completed. \n"
-                     f"Train Loss: {train_loss:.4f}, Train RMSE: {train_rmse:.4f}, Train PCC: {train_pcc:.4f}, Train SCC: {train_scc:.4f},\n"
-                     f"Val Loss: {val_loss:.4f}, Val RMSE: {val_rmse:.4f} Val PCC: {val_pcc:.4f}, Val SCC: {val_scc:.4f} \n"
+        logging.info(f"Fold {fold} Epoch [{epoch+1}/{training_config['num_epochs']}] completed. \n"
+                     f"Train RMSE: {train_rmse:.4f}, Train PCC: {train_pcc:.4f}, Train SCC: {train_scc:.4f}\n"
+                     f"Val RMSE: {val_rmse:.4f}, Val PCC: {val_pcc:.4f}, Val SCC: {val_scc:.4f} \n"
         )
 
-        # Check Early Stopping
+        # Check Early Stopping and manage weights
         if val_rmse < best_val_rmse:
             best_val_rmse = val_rmse
             patience_counter = 0
 
-            # Save Best Model & Results
+            # Save Best Model
             torch.save({
                 'epoch': epoch + 1,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
-                'train_loss': train_loss,
-                'val_loss': val_loss,
+                'train_rmse': train_rmse,
+                'val_rmse': val_rmse,
             }, os.path.join(fold_checkpoint_dir, "best_model.pth"))
 
-            torch.save({
-                "actuals": train_actuals,
-                "predictions": train_predictions,
-                "drug_labels": train_samples
-            }, os.path.join(fold_result_dir, f"train_results_epoch_{epoch+1}.pt"))
-
-            torch.save({
-                "actuals": val_actuals,
-                "predictions": val_predictions,
-                "drug_labels": val_samples
-            }, os.path.join(fold_result_dir, f"val_results_epoch_{epoch+1}.pt"))
-
-            logging.info(f"✅ New best model and results saved at epoch {epoch+1} (RMSE: {val_rmse:.4f} in directory {fold_result_dir})")
-
-            # Update Overall Best Model
-            if val_rmse < best_val_rmse_overall:
-                best_val_rmse_overall = val_rmse
-                best_checkpoint_overall = os.path.join(chpt_dir, "overall_best_model.pth")
-                best_fold_id = fold
+            # Current epoch weights → best epoch weights
+            current_weights_dir = f"{fold_attn_dir}/current_epoch"
+            best_weights_dir = f"{fold_attn_dir}/best_epoch"
+            
+            # Remove old best weights
+            if os.path.exists(best_weights_dir):
+                import shutil
+                shutil.rmtree(best_weights_dir)
+            
+            # Move current weights → best weights
+            if os.path.exists(current_weights_dir):
+                os.rename(current_weights_dir, best_weights_dir)
+                logging.info(f"✅ Weights saved for Fold {fold}, Epoch {epoch+1} (RMSE: {val_rmse:.4f})")
 
         else:
             patience_counter += 1
-            logging.info(f"⚠️ No improvement in validation RMSE. Patience: {patience_counter}/{config['early_stopping_patience']}")
-            if patience_counter >= config['early_stopping_patience']:
+            
+            # Delete current epoch weights
+            current_weights_dir = f"{fold_attn_dir}/current_epoch"
+            if os.path.exists(current_weights_dir):
+                import shutil
+                shutil.rmtree(current_weights_dir)
+                logging.info(f"🗑️ Weights deleted for Fold {fold}, Epoch {epoch+1} (not best)")
+            
+            logging.info(f"⚠️ No improvement in validation RMSE. Patience: {patience_counter}/{training_config['early_stopping_patience']}")
+            if patience_counter >= training_config['early_stopping_patience']:
                 logging.info("🛑 Early stopping triggered. Training terminated.")
                 break
 
-        plot_statics( FILE_NAME, f"Fold {fold}", train_losses, val_losses, train_rmses, val_rmses)
+        plot_statics( FILE_NAME, f"Fold {fold}", train_rmses, val_rmses)
 
-# Cross Validation Best Results
-logging.info("🏁 Cross Validation Completed.")
-logging.info(f"Best Fold: {best_fold_id}")
-logging.info(f"Best RMSE: {best_val_rmse_overall:.4f}")
-logging.info(f"Best Checkpoint Path: {best_checkpoint_overall}")
+    if fold != SAVE_FOLD_NUMBER:  # Only keep the specified fold
+        current_fold_weights_dir = f"{WEIGHTS_DIR}/{FILE_NAME}/fold_{fold}"
+        current_fold_results_dir = f"{PREDICTION_DIR}/{FILE_NAME}/fold_{fold}"
+        
+        if os.path.exists(current_fold_weights_dir):
+            shutil.rmtree(current_fold_weights_dir)
+            logging.info(f"🗑️ Deleted weights for Fold {fold} (not Fold {SAVE_FOLD_NUMBER})")
+        
+        if os.path.exists(current_fold_results_dir):
+            shutil.rmtree(current_fold_results_dir)
+            logging.info(f"🗑️ Deleted results for Fold {fold} (not Fold {SAVE_FOLD_NUMBER})")
+    else:
+        logging.info(f"✅ Keeping Fold {fold} as the fixed fold to save")
 
+# Save the specified fold's results
+target_fold_result_dir = f"{PREDICTION_DIR}/{FILE_NAME}/fold_{SAVE_FOLD_NUMBER}"
+target_fold_weights_dir = f"{WEIGHTS_DIR}/{FILE_NAME}/fold_{SAVE_FOLD_NUMBER}"
+os.makedirs(target_fold_result_dir, exist_ok=True)
+os.makedirs(target_fold_weights_dir, exist_ok=True)
 
-# Save Loss Plots
-plot_statics(FILE_NAME, "Total", train_losses, val_losses, train_rmses, val_rmses)
+if os.path.exists(target_fold_weights_dir):
+    # Save the target fold's predictions
+    target_fold_data = torch.load(f'{data_config["cross_validation_data_dir"]}/cross_valid_fold_{SAVE_FOLD_NUMBER}.pt')
+    target_fold_train_dataset = DrugResponseDataset(**target_fold_data['train'])
+    target_fold_val_dataset = DrugResponseDataset(**target_fold_data['validation'])
+    target_fold_train_loader = DataLoader(target_fold_train_dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn)
+    target_fold_val_loader = DataLoader(target_fold_val_dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn)
+    
+    # Load the best model
+    target_fold_checkpoint = torch.load(f"{chpt_dir}/fold_{SAVE_FOLD_NUMBER}/best_model.pth")
+    
+    # Recreate model and load weights
+    model = DrugResponseModel(
+        pathway_masks=pathway_masks,
+        pathway_laplacian_embeddings=pathway_laplacian_embeddings, 
+        gene_layer_dim=GENE_LAYER_EMBEDDING_DIM,
+        substructure_layer_dim=SUBSTRUCTURE_LAYER_EMBEDDING_DIM,
+        cross_attn_dim=CROSS_ATTN_EMBEDDING_DIM,
+        final_dim=FINAL_EMBEDDING_DIM,
+        max_gene_slots=MAX_GENE_SLOTS, 
+        max_drug_substructures=MAX_DRUG_SUBSTRUCTURES 
+    ).to(DEVICE)
+    model.load_state_dict(target_fold_checkpoint['model_state_dict'])
+    
+    model.eval()
+    
+    # Generate train predictions
+    target_fold_train_actuals, target_fold_train_predictions, target_fold_train_samples = [], [], []
+    with torch.no_grad():
+        for batch in tqdm(target_fold_train_loader, desc=f"Generating Fold {SAVE_FOLD_NUMBER} train predictions"):
+            outputs, loss, rmse, sample_indices, labels = process_batch(0, batch, 0, model, criterion, DEVICE, mode="val", is_best_epoch=False, save_weights=False)
+            target_fold_train_actuals.extend(labels)
+            target_fold_train_predictions.extend(outputs)
+            target_fold_train_samples.extend(sample_indices)
+    
+    # Generate validation predictions
+    target_fold_val_actuals, target_fold_val_predictions, target_fold_val_samples = [], [], []
+    with torch.no_grad():
+        for batch in tqdm(target_fold_val_loader, desc=f"Generating Fold {SAVE_FOLD_NUMBER} validation predictions"):
+            outputs, loss, rmse, sample_indices, labels = process_batch(0, batch, 0, model, criterion, DEVICE, mode="val", is_best_epoch=False, save_weights=False)
+            target_fold_val_actuals.extend(labels)
+            target_fold_val_predictions.extend(outputs)
+            target_fold_val_samples.extend(sample_indices)
+    
+    # Save the target fold train predictions
+    torch.save({
+        "actuals": target_fold_train_actuals,
+        "predictions": target_fold_train_predictions,
+        "drug_labels": target_fold_train_samples
+    }, os.path.join(target_fold_result_dir, "train_results.pt"))
+    
+    # Save the target fold validation predictions
+    torch.save({
+        "actuals": target_fold_val_actuals,
+        "predictions": target_fold_val_predictions,
+        "drug_labels": target_fold_val_samples
+    }, os.path.join(target_fold_result_dir, "val_results.pt"))
+    
+    logging.info(f"✅ Fold {SAVE_FOLD_NUMBER} train and validation results saved in {target_fold_result_dir}")
+    
+    # Move the target fold's weights → final location
+    best_epoch_weights = f"{target_fold_weights_dir}/best_epoch"
+    if os.path.exists(best_epoch_weights):
+        for file in os.listdir(best_epoch_weights):
+            src = os.path.join(best_epoch_weights, file)
+            dst = os.path.join(target_fold_weights_dir, file)
+            shutil.copy2(src, dst)
+        logging.info(f"✅ Fold {SAVE_FOLD_NUMBER} weights saved in {target_fold_weights_dir}")
+    
+    # Clean up
+    if os.path.exists(best_epoch_weights):
+        shutil.rmtree(best_epoch_weights)
+    current_epoch_dir = f"{target_fold_weights_dir}/current_epoch"
+    if os.path.exists(current_epoch_dir):
+        shutil.rmtree(current_epoch_dir)
+else:
+    logging.warning(f"⚠️ Fold {SAVE_FOLD_NUMBER} weights directory not found!")

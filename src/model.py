@@ -49,7 +49,7 @@ class DrugResponseModel(nn.Module):
         self.bn2 = nn.BatchNorm1d(final_dim // 2)
         self.fc3 = nn.Linear(final_dim // 2, 1)
 
-    def forward(self, gene_embeddings_input, drug_embeddings_input, drug_spectral_embeddings, drug_masks_input, batch_idx_for_debug=None, current_epoch_for_debug=None): # 디버깅 인자 유지
+    def forward(self, gene_embeddings_input, drug_embeddings_input, drug_spectral_embeddings, drug_masks_input):
 
         current_device = gene_embeddings_input.device
         batch_size = gene_embeddings_input.size(0)

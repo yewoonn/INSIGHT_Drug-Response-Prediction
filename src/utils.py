@@ -24,37 +24,28 @@ def save_plot(x, y1, y2, title, xlabel, ylabel, legend1, legend2, filepath):
     plt.close()
 
 
-def plot_statics(file_name, train_losses, val_losses, train_rmses, val_rmses):
+def plot_statics(file_name, label, train_rmses, val_rmses):
     plot_dir = './plots/' + file_name
     os.makedirs(plot_dir, exist_ok=True)
 
     # 데이터 길이 확인
-    if len(train_losses) != len(val_losses) or len(train_rmses) != len(val_rmses):
+    if len(train_rmses) != len(val_rmses):
         print("Warning: Mismatched lengths in training and validation data!")
     
-    if len(train_losses) == 0 or len(val_losses) == 0:
-        print("Error: No data to plot for losses!")
+    if len(train_rmses) == 0 or len(val_rmses) == 0:
+        print("Error: No data to plot for RMSEs!")
         return
     if len(train_rmses) == 0 or len(val_rmses) == 0:
-        print("Error: No data to plot for accuracies!")
+        print("Error: No data to plot for RMSEs!")
         return
-
-    # Loss Plot
-    save_plot(
-        range(1, len(train_losses) + 1),  # x 값으로 epoch 범위 설정
-        train_losses, val_losses,
-        "Training and Validation MSE", "Epoch", "MSE",
-        "Train MSE", "Validation MSE",
-        os.path.join(plot_dir, "MSE.png")
-    )
     
-    # Accuracy Plot
+    # RMLSE Plot
     save_plot(
         range(1, len(train_rmses) + 1),  # x 값으로 epoch 범위 설정
         train_rmses, val_rmses,
         "Training and Validation RMSE", "Epoch", "RMSE",
         "Train RMSE", "Validation RMSE",
-        os.path.join(plot_dir, "RMSE.png")
+        os.path.join(plot_dir, f"{label}_RMSE.png")
     )
 
 def set_seed(val):

@@ -1,6 +1,0 @@
-streamlit
-pandas
-torch
-umap-learn
-numpy
-plotly
