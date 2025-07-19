@@ -4,151 +4,209 @@ from torch.utils.data import DataLoader
 from scipy.stats import spearmanr, pearsonr
 from sklearn.metrics import mean_squared_error
 import numpy as np
-from utils import plot_predictions
 
 import logging
 from tqdm import tqdm
 import os
 from datetime import datetime
+import yaml
+import argparse
 
 from dataset import DrugResponseDataset, collate_fn
 from model import DrugResponseModel
-from utils import set_seed
-MAX_GENE_SLOTS = 218  # 실제 사용하는 값으로 설정 (이전 로그 기반)
-MAX_DRUG_SUBSTRUCTURES = 17 # 실제 사용하는 값으로 설정 (이전 로그 기반, collate_fn에서 패딩 후의 크기)
+from utils import set_seed, plot_predictions
 
-# Configuration
-config = {
-    'device': torch.device("cuda:0" if torch.cuda.is_available() else "cpu"),
-    'batch_size': 32,
-    'checkpoint_path': './checkpoints/20250521_14/best_model.pth',
-    'test_data_path': './dataset_full_CV_6&7/test_dataset.pt',
-}
+# ========== Configuration ==========
+# Parse command line
+def parse_args():
+    parser = argparse.ArgumentParser(description='Drug Response Prediction Testing')
+    parser.add_argument('--config', type=str, default='config.yml', 
+                       help='Path to configuration file (default: config.yml)')
+    parser.add_argument('--checkpoint_date', type=str, required=True,
+                       help='Checkpoint date folder (e.g., 20250712_21)')
+    return parser.parse_args()
 
-# Model Parameters
-GENE_LAYER_EMBEDDING_DIM = 64 # input dim
-SUBSTRUCTURE_LAYER_EMBEDDING_DIM = 64 # input dim
-CROSS_ATTN_EMBEDDING_DIM = 64
-FINAL_EMBEDDING_DIM = 128
-HIDDEN_DIM = 32
-DEPTH = 2
+# Load configuration
+def load_config(config_path='config.yml'):
+    with open(config_path, 'r', encoding='utf-8') as file:
+        config = yaml.safe_load(file)
+    return config
 
-BATCH_SIZE = config['batch_size']
+args = parse_args()
+config = load_config(args.config)
+
+CHECKPOINT_DATE = args.checkpoint_date  # 커맨드 라인에서 입력받음
+
+# Extract config parameters
+model_config = config['model']
+data_config = config['data']
+training_config = config['training']
+
+# Data paths
+TEST_DATA_PATH = data_config['test_data_path']
+GENE_10FB_EMBEDDINGS_PATH = data_config['gene_10fb_embeddings_path']
+PATHWAY_GENE_INDICES_PATH = data_config['pathway_gene_indices_path']
+
+# Model parameters
+GENE_FFN_OUTPUT_DIM = model_config['gene_ffn_output_dim']
+DRUG_FFN_OUTPUT_DIM = model_config['drug_ffn_output_dim']
+DRUG_INPUT_DIM = model_config.get('drug_input_dim', 768)
+IS_DIFFER = model_config.get('isDiffer', True)
+CROSS_ATTN_EMBEDDING_DIM = model_config['cross_attn_embedding_dim']
+FINAL_EMBEDDING_DIM = model_config['final_embedding_dim']
+OUTPUT_DIM = model_config['output_dim']
+MAX_GENE_SLOTS = model_config['max_gene_slots']
+
+# Training parameters
+BATCH_SIZE = training_config['batch_size']
+
+DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 FILE_NAME = f"test_{datetime.now().strftime('%Y%m%d_%H')}"
 RESULT_DIR = f"results/{FILE_NAME}"
+LOG_FILE = f"log/test/{FILE_NAME}.log"
 os.makedirs(RESULT_DIR, exist_ok=True)
+os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
 
-
-# Logger 설정
-log_filename = f"log/test/{FILE_NAME}.log"
-os.makedirs(os.path.dirname(log_filename), exist_ok=True)
+# ========== Logging ==========
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(log_filename),
+        logging.FileHandler(LOG_FILE),
         logging.StreamHandler()
     ]
 )
-logging.info("Starting regression test script.")
+logging.info("🧪 Starting 5-Fold Regression Test")
 set_seed(42)
 
-# 1. Load Test Dataset
-test_data = torch.load(config['test_data_path'], weights_only=False)
+# ========== Load Test Set ==========
+test_data = torch.load(TEST_DATA_PATH)
+gene_10fb_embeddings = torch.load(GENE_10FB_EMBEDDINGS_PATH)
+test_data['gene_embeddings'] = gene_10fb_embeddings # gene_embeddings 교체
+
 test_dataset = DrugResponseDataset(
     gene_embeddings=test_data['gene_embeddings'],
-    drug_embeddings=test_data['drug_embeddings'],
-    drug_masks=test_data['drug_masks'],
+    drug_chembert_embeddings=test_data['drug_chembert_embeddings'],
     labels=test_data['labels'],
     sample_indices=test_data['sample_indices']
 )
-test_loader = DataLoader(test_dataset, batch_size=config['batch_size'], shuffle=False, collate_fn=collate_fn)
+test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn)
 
-# 2. Load Pathway Info
-pathway_masks = torch.load('./input/pathway_mask.pt')
+# ========== Load Pathway Info ==========
+pathway_gene_indices = torch.load(PATHWAY_GENE_INDICES_PATH)
 
-# 3. Initialize Model
-model = DrugResponseModel(
-    pathway_masks=pathway_masks,
-    gene_layer_dim=GENE_LAYER_EMBEDDING_DIM,
-    substructure_layer_dim=SUBSTRUCTURE_LAYER_EMBEDDING_DIM,
-    cross_attn_dim=CROSS_ATTN_EMBEDDING_DIM,
-    final_dim=FINAL_EMBEDDING_DIM,
-    max_gene_slots=MAX_GENE_SLOTS, # <<< 전달
-    max_drug_substructures=MAX_DRUG_SUBSTRUCTURES # <<< 전달
-)
+# ========== Evaluation ==========
+summary_stats = []
 
-# Load Checkpoint
-checkpoint = torch.load(config['checkpoint_path'], map_location=config['device'])
-model.load_state_dict(checkpoint['model_state_dict'])
-model = model.to(config['device'])
-model.eval()
-logging.info("Model loaded and ready for regression evaluation.")
+for fold in range(1, 6):
+    logging.info(f"\n📂 Fold {fold} Evaluation Start")
+    checkpoint_path = f'./checkpoints/{CHECKPOINT_DATE}/fold_{fold}/best_model.pth'
+    fold_result_dir = os.path.join(RESULT_DIR, f"fold_{fold}")
+    os.makedirs(fold_result_dir, exist_ok=True)
 
-criterion = nn.MSELoss()
+    # --- 모델 초기화 수정 ---
+    model = DrugResponseModel(
+        pathway_gene_indices=pathway_gene_indices,
+        gene_ffn_output_dim=GENE_FFN_OUTPUT_DIM,
+        drug_ffn_output_dim=DRUG_FFN_OUTPUT_DIM,
+        cross_attn_dim=CROSS_ATTN_EMBEDDING_DIM,
+        final_dim=FINAL_EMBEDDING_DIM,
+        max_gene_slots=MAX_GENE_SLOTS,
+        drug_input_dim=DRUG_INPUT_DIM,
+        isDiffer=IS_DIFFER,
+        gene_ffn_hidden_dim=model_config['gene_ffn_hidden_dim'],
+        drug_ffn_hidden_dim=model_config['drug_ffn_hidden_dim'],
+        gene_ffn_dropout=model_config['gene_ffn_dropout'],
+        drug_ffn_dropout=model_config['drug_ffn_dropout'],
+        num_heads=model_config['num_heads'],
+        depth=model_config['depth'],
+        mlp_dropout=model_config['mlp_dropout'],
+        final_dim_reduction_factor=model_config['final_dim_reduction_factor']
+    ).to(DEVICE)
 
-# 4. Test Loop
-def test_model():
-    total_loss = 0.0
+    checkpoint = torch.load(checkpoint_path, map_location=DEVICE)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    model.eval()
+
+    criterion = nn.MSELoss()
     actuals, predictions, sample_indices_all = [], [], []
-
-    # attention 저장 디렉토리
-    attn_dir = os.path.join(RESULT_DIR, "attention_weights")
-    os.makedirs(attn_dir, exist_ok=True)
+    total_loss = 0.0
 
     with torch.no_grad():
-        for batch_idx, batch in enumerate(tqdm(test_loader, desc="Testing")):
-            gene_embeddings = batch['gene_embeddings'].to(config['device'])
-            drug_embeddings = batch['drug_embeddings'].to(config['device'])
-            drug_masks = batch['drug_masks'].to(config['device'])
-            labels = batch['labels'].to(config['device'])
+        for batch_idx, batch in enumerate(tqdm(test_loader, desc=f"Testing Fold {fold}")):
+            gene_embeddings = batch['gene_embeddings'].to(DEVICE)
+            drug_chembert_embeddings = batch['drug_chembert_embeddings'].to(DEVICE)
+            labels = batch['labels'].to(DEVICE)
             sample_indices = batch['sample_indices']
 
-            outputs, gene2sub_weights, sub2gene_weights, final_pathway_embedding, final_drug_embedding = model(
-                gene_embeddings, drug_embeddings, drug_masks)
+            outputs, *_ = model(gene_embeddings, drug_chembert_embeddings)
             outputs = outputs.squeeze(dim=-1)
 
             loss = criterion(outputs, labels)
             total_loss += loss.item()
 
-            # 결과 저장
             actuals.extend(labels.cpu().numpy())
             predictions.extend(outputs.cpu().numpy())
             sample_indices_all.extend(sample_indices)
 
-            # # attention weight 저장
-            # torch.save(gene2sub_weights.cpu(), os.path.join(attn_dir, f"B{batch_idx}_gene2sub.pt"))
-            # torch.save(sub2gene_weights.cpu(), os.path.join(attn_dir, f"B{batch_idx}_sub2gene.pt"))
-            # torch.save(final_pathway_embedding.cpu(), os.path.join(attn_dir, f"B{batch_idx}_pathway.pt"))
-            # torch.save(final_drug_embedding.cpu(), os.path.join(attn_dir, f"B{batch_idx}_drug.pt"))
-            # torch.save(sample_indices, os.path.join(attn_dir, f"B{batch_idx}_samples.pt"))
-
-
+    # 성능 지표 계산
     actuals = np.array(actuals)
     predictions = np.array(predictions)
-
     rmse = np.sqrt(mean_squared_error(actuals, predictions))
     pcc, _ = pearsonr(actuals, predictions)
     scc, _ = spearmanr(actuals, predictions)
     test_loss = total_loss / len(test_loader)
 
-    logging.info(f"Test Loss (MSE): {test_loss:.4f}")
-    logging.info(f"Test RMSE: {rmse:.4f}")
-    logging.info(f"Test Pearson Correlation (PCC): {pcc:.4f}")
-    logging.info(f"Test Spearman Correlation (SCC): {scc:.4f}")
+    logging.info(f"✅ Fold {fold} Evaluation Complete")
+    logging.info(f"Test Loss: {test_loss:.4f}, RMSE: {rmse:.4f}, PCC: {pcc:.4f}, SCC: {scc:.4f}")
 
-    # 결과 저장
+    # 저장
     torch.save({
         "actuals": actuals,
         "predictions": predictions,
-        "drug_labels": sample_indices_all
-    }, os.path.join(RESULT_DIR, "test_results.pt"))
-    logging.info(f"Test results saved to {os.path.join(RESULT_DIR, 'test_results.pt')}")
+        "sample_indices": sample_indices_all
+    }, os.path.join(fold_result_dir, "test_results.pt"))
 
-    # RMSE 플랏 저장
-    plot_path = os.path.join(RESULT_DIR, "rmse_scatter_plot.png")
+    plot_path = os.path.join(fold_result_dir, "rmse_scatter_plot.png")
     plot_predictions(actuals, predictions, plot_path)
-    logging.info(f"RMSE scatter plot saved to {plot_path}")
 
+    summary_stats.append({
+        "fold": fold,
+        "rmse": rmse,
+        "pcc": pcc,
+        "scc": scc,
+        "loss": test_loss
+    })
 
-test_model()
+# ========== Summary Save ==========
+summary_log_path = os.path.join(RESULT_DIR, "summary.log")
+with open(summary_log_path, "w") as f:
+    for stat in summary_stats:
+        f.write(f"Fold {stat['fold']} - Loss: {stat['loss']:.4f}, RMSE: {stat['rmse']:.4f}, "
+                f"PCC: {stat['pcc']:.4f}, SCC: {stat['scc']:.4f}\n")
+
+logging.info("🎯 All folds evaluated successfully. Summary saved.")
+
+# ========== Mean ± Std Summary ==========
+import numpy as np
+
+def mean_std_str(arr):
+    return f"{np.mean(arr):.4f} ± {np.std(arr):.4f}"
+
+rmse_list = [s["rmse"] for s in summary_stats]
+pcc_list = [s["pcc"] for s in summary_stats]
+scc_list = [s["scc"] for s in summary_stats]
+loss_list = [s["loss"] for s in summary_stats]
+
+logging.info("📊 5-Fold Cross-Validation Summary (Mean ± Std)")
+logging.info(f"RMSE: {mean_std_str(rmse_list)}")
+logging.info(f"PCC:  {mean_std_str(pcc_list)}")
+logging.info(f"SCC:  {mean_std_str(scc_list)}")
+logging.info(f"Loss: {mean_std_str(loss_list)}")
+
+with open(summary_log_path, "a") as f:
+    f.write("\n📊 Mean ± Std:\n")
+    f.write(f"RMSE: {mean_std_str(rmse_list)}\n")
+    f.write(f"PCC:  {mean_std_str(pcc_list)}\n")
+    f.write(f"SCC:  {mean_std_str(scc_list)}\n")
+    f.write(f"Loss: {mean_std_str(loss_list)}\n")

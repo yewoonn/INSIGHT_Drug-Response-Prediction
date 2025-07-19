@@ -2,121 +2,146 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from modules.embedding_layer import GeneEmbeddingLayer, SubstructureEmbeddingLayer
-from modules.diff_cross_attn import Gene2SubDifferCrossMHA, Sub2GeneDifferCrossMHA
+from modules.diff_cross_attn import Path2DrugDifferCrossMHA, Drug2PathDifferCrossMHA
+from modules.cross_attn import Path2DrugCrossMHA, Drug2PathCrossMHA
+
+#  1. FFN 모듈 (Gene)
+class CellLineGeneFFN(nn.Module):
+    """(B, Max_Genes, 10) 입력을 받아 (B, output_dim)을 출력하는 FFN"""
+    def __init__(self, max_genes, output_dim, input_dim=10, hidden_dim=1024, dropout_rate=0.5):
+        super(CellLineGeneFFN, self).__init__()
+        self.flattened_input_dim = max_genes * input_dim
+        self.network = nn.Sequential(
+            nn.Linear(self.flattened_input_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(hidden_dim, output_dim)
+        )
+    
+    def forward(self, x):
+        B = x.shape[0]
+        x_flat = x.view(B, -1)
+        return self.network(x_flat)
+
+#  2. FFN 모듈 (Drug) - ChemBERTa embeddings 처리
+class DrugFFN(nn.Module):
+    """(B, 768) ChemBERTa 입력을 받아 (B, output_dim)을 출력하는 FFN"""
+    def __init__(self, input_dim=768, output_dim=64, hidden_dim=1024, dropout_rate=0.5):
+        super(DrugFFN, self).__init__()
+        self.network = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(hidden_dim, output_dim)
+        )
+    
+    def forward(self, x):
+        return self.network(x)
+
 
 #  DRUG RESPONSE MODEL
 class DrugResponseModel(nn.Module):
-    def __init__(self, pathway_masks, pathway_laplacian_embeddings,
-                 gene_layer_dim, substructure_layer_dim, 
+    def __init__(self, pathway_gene_indices,
+                 gene_ffn_output_dim, drug_ffn_output_dim, 
                  cross_attn_dim, final_dim,
-                 max_gene_slots, max_drug_substructures):
+                 max_gene_slots, gene_input_dim=10, drug_input_dim=768, isDiffer=True,
+                 gene_ffn_hidden_dim=1024, drug_ffn_hidden_dim=1024,
+                 gene_ffn_dropout=0.5, drug_ffn_dropout=0.5,
+                 num_heads=4, depth=2, mlp_dropout=0.3, final_dim_reduction_factor=2):
         super(DrugResponseModel, self).__init__()
-        self.raw_pathway_masks = pathway_masks # [Pathway_num, Max_Gene_Slots]
-
-        # Embedding Layer (Value)
-        self.gene_embedding_layer = GeneEmbeddingLayer(gene_layer_dim)
-        self.substructure_embedding_layer = SubstructureEmbeddingLayer(substructure_layer_dim)
-
-        # Positional Embedding Layer (Index 1, ... Max)
+        
+        self.register_buffer('pathway_gene_indices', pathway_gene_indices)
         self.max_gene_slots = max_gene_slots
-        self.max_drug_substructures = max_drug_substructures
-        self.gene_pos_embedding_layer = nn.Embedding(self.max_gene_slots, gene_layer_dim)
-        self.drug_pos_embedding_layer = nn.Embedding(self.max_drug_substructures, substructure_layer_dim)
-        
-        # Spectral Embedding Layer (Laplacian Embedding)
-        self.pathway_spectral_embeddings = pathway_laplacian_embeddings  # [Pathway_num, Max_Gene_Slots, laplacian_dim (4)]
-        self.pathway_spectral_layer = nn.Linear(4, gene_layer_dim)
-        self.drug_spectral_layer = nn.Linear(4, substructure_layer_dim)
+        self.gene_value_norm = nn.LayerNorm(gene_ffn_output_dim)
 
-        # Cross Attention Layer
-        self.Gene2Sub_cross_attention = Gene2SubDifferCrossMHA(gene_embed_dim=gene_layer_dim, sub_embed_dim=substructure_layer_dim, attention_dim=cross_attn_dim, num_heads=4, depth=2)
-        self.Sub2Gene_cross_attention = Sub2GeneDifferCrossMHA(sub_embed_dim=substructure_layer_dim, gene_embed_dim=gene_layer_dim, attention_dim=cross_attn_dim, num_heads=4, depth=2)
+        # FFN Modules Initialization
+        self.gene_ffn = CellLineGeneFFN(max_genes=max_gene_slots, input_dim=gene_input_dim, output_dim=gene_ffn_output_dim, 
+                                       hidden_dim=gene_ffn_hidden_dim, dropout_rate=gene_ffn_dropout)
+        self.drug_ffn = DrugFFN(input_dim=drug_input_dim, output_dim=drug_ffn_output_dim,
+                               hidden_dim=drug_ffn_hidden_dim, dropout_rate=drug_ffn_dropout)
         
-        # Normalization for Each Embedding
-        self.gene_value_norm = nn.LayerNorm(gene_layer_dim)
-        self.gene_pos_norm = nn.LayerNorm(gene_layer_dim)
-        self.gene_spec_norm = nn.LayerNorm(gene_layer_dim)
-
-        self.sub_value_norm = nn.LayerNorm(substructure_layer_dim)
-        self.sub_pos_norm = nn.LayerNorm(substructure_layer_dim)
-        self.sub_spec_norm = nn.LayerNorm(substructure_layer_dim)
-        
-        # MLP Layer
+        # Cross-Attention Modules Initialization
+        if isDiffer:
+            self.Path2Drug_cross_attention = Path2DrugDifferCrossMHA(
+                pathway_embed_dim=gene_ffn_output_dim, 
+                drug_embed_dim=drug_ffn_output_dim, 
+                attention_dim=cross_attn_dim, 
+                num_heads=num_heads, 
+                depth=depth
+            )
+            self.Drug2Path_cross_attention = Drug2PathDifferCrossMHA(
+                drug_embed_dim=drug_ffn_output_dim, 
+                pathway_embed_dim=gene_ffn_output_dim, 
+                attention_dim=cross_attn_dim, 
+                num_heads=num_heads, 
+                depth=depth
+            )
+        else:
+            self.Path2Drug_cross_attention = Path2DrugCrossMHA(
+                pathway_embed_dim=gene_ffn_output_dim, 
+                drug_embed_dim=drug_ffn_output_dim, 
+                attention_dim=cross_attn_dim, 
+                num_heads=num_heads, 
+                depth=depth
+            )
+            self.Drug2Path_cross_attention = Drug2PathCrossMHA(
+                drug_embed_dim=drug_ffn_output_dim, 
+                pathway_embed_dim=gene_ffn_output_dim, 
+                attention_dim=cross_attn_dim, 
+                num_heads=num_heads, 
+                depth=depth
+            )
+        self.dropout = nn.Dropout(mlp_dropout)
         self.fc1 = nn.Linear(2 * cross_attn_dim, final_dim)
         self.bn1 = nn.BatchNorm1d(final_dim)
-        self.fc2 = nn.Linear(final_dim, final_dim // 2)
-        self.bn2 = nn.BatchNorm1d(final_dim // 2)
-        self.fc3 = nn.Linear(final_dim // 2, 1)
+        self.fc2 = nn.Linear(final_dim, final_dim // final_dim_reduction_factor)
+        self.bn2 = nn.BatchNorm1d(final_dim // final_dim_reduction_factor)
+        self.fc3 = nn.Linear(final_dim // final_dim_reduction_factor, 1)
 
-    def forward(self, gene_embeddings_input, drug_embeddings_input, drug_spectral_embeddings, drug_masks_input):
-
+    def forward(self, gene_embeddings_input, drug_chembert_embeddings):
         current_device = gene_embeddings_input.device
         batch_size = gene_embeddings_input.size(0)
+        num_pathways = self.pathway_gene_indices.shape[0]
 
-        # Mask
-        pathway_masks_for_batch = self.raw_pathway_masks.to(current_device).unsqueeze(0).expand(batch_size, -1, -1)  # [Num_Pathways, Max_Gene_Slots] -> [B, Num_Pathways, Max_Gene_Slots]
-        drug_masks_for_attention = drug_masks_input # [B, Max_Drug_Substructures]
+        # Pathway Instantiation
+        indices = self.pathway_gene_indices.clone()
+        indices[indices == -1] = 0 
+        expanded_genes = gene_embeddings_input.unsqueeze(1).expand(-1, num_pathways, -1, -1)
+        expanded_indices = indices.unsqueeze(0).unsqueeze(-1).expand(batch_size, -1, -1, 10)
+        pathway_specific_genes = torch.gather(expanded_genes, 2, expanded_indices.to(current_device))
 
-        # Embedding Layer (Value)
-        gene_embedded_value = self.gene_embedding_layer(gene_embeddings_input) # [B, Num_Pathways, Max_Gene_Slots] -> [B, Num_Pathways, Max_Gene_Slots, gene_layer_dim]
-        drug_embedded_value = self.substructure_embedding_layer(drug_embeddings_input) # [B, Max_Drug_Substructures, 768] -> [B, Max_Drug_Substructures, substructure_layer_dim]
+        # Gene FFN Module
+        B, P, G, D = pathway_specific_genes.shape
+        ffn_input_reshaped = pathway_specific_genes.view(B * P, G, D)
+        ffn_output = self.gene_ffn(ffn_input_reshaped)
+        gene_embedded_value = ffn_output.view(B, P, -1)
+        pathway_embeddings = self.gene_value_norm(gene_embedded_value)  # [B, P, gene_ffn_output_dim]
+
+        # Drug FFN Module
+        drug_embeddings = self.drug_ffn(drug_chembert_embeddings)  # [B, drug_ffn_output_dim]
         
-        # Positional Embedding Layer (Index 1, ... Max)
-        gene_pos_embed_base = self.gene_pos_embedding_layer(torch.arange(self.max_gene_slots, device=current_device)) # [Max_Gene_Slots] -> [Max_Gene_Slots, gene_layer_dim]
-        gene_pos_embed = gene_pos_embed_base.unsqueeze(0).unsqueeze(0)  # [1, 1, Max_Gene_Slots, gene_layer_dim] 
-        drug_pos_embed_base = self.drug_pos_embedding_layer(torch.arange(self.max_drug_substructures, device=current_device)) # [Max_Drug_Substructures] -> [Max_Drug_Substructures, substructure_layer_dim]
-        drug_pos_embed = drug_pos_embed_base.unsqueeze(0) # [1, Max_Drug_Substructures, substructure_layer_dim]
-        
-        # Spectral Embedding Layer (Laplacian Embedding)
-        pathway_spec_embed = self.pathway_spectral_layer(self.pathway_spectral_embeddings.to(current_device)) # [Pathway_num, Max_Gene_Slots, gene_layer_dim]
-        pathway_spec_embed = pathway_spec_embed.unsqueeze(0) # [1, Pathway_num, Max_Gene_Slots, gene_layer_dim]
-        drug_spec_embed = self.drug_spectral_layer(drug_spectral_embeddings) # [B, Max_Drug_Substructures, substructure_layer_dim]
-        
-        # Summation of Embedding
-        gene_embeddings= (
-            self.gene_value_norm(gene_embedded_value) +
-            self.gene_pos_norm(gene_pos_embed) +
-            self.gene_spec_norm(pathway_spec_embed)
-        )  # [B, P, G, D]
-        
-        drug_embeddings = (
-            self.sub_value_norm(drug_embedded_value) +
-            self.sub_pos_norm(drug_pos_embed) +
-            self.sub_spec_norm(drug_spec_embed)
-        )  # [B, S, D]
-        
-        # Gene2Sub Cross attention
-        gene2sub_out, gene2sub_weights = self.Gene2Sub_cross_attention(
-            query=gene_embeddings,    
-            key=drug_embeddings,      
-            query_mask=pathway_masks_for_batch,
-            key_mask=drug_masks_for_attention
-        )
-        gene2sub_out = gene2sub_out.masked_fill(
-            ~pathway_masks_for_batch.unsqueeze(-1),
-            0.0
+        # Path2Drug Cross-Attention
+        path2drug_out, path2drug_weights = self.Path2Drug_cross_attention(
+            query=pathway_embeddings,    # [B, P, gene_ffn_output_dim]
+            key=drug_embeddings,         # [B, drug_ffn_output_dim]
         )
 
-        # Sub2Gene Cross attention
-        sub2gene_out, sub2gene_weights = self.Sub2Gene_cross_attention(
-            query=drug_embeddings,    
-            key=gene_embeddings,      
-            query_mask=drug_masks_for_attention,
-            key_mask=pathway_masks_for_batch
-        )
-        sub2gene_out = sub2gene_out.masked_fill(
-            ~drug_masks_for_attention.unsqueeze(-1), # device 일치됨
-            0.0
+        # Drug2Path Cross-Attention  
+        drug2path_out, drug2path_weights = self.Drug2Path_cross_attention(
+            query=drug_embeddings,       # [B, drug_ffn_output_dim]
+            key=pathway_embeddings,      # [B, P, gene_ffn_output_dim]
         )
 
-        # Aggregation & MLP
-        final_pathway_embedding = torch.amax(gene2sub_out, dim=(1, 2))
-        final_drug_embedding, _ = sub2gene_out.max(dim=1)
+        # Pooling operations
+        final_pathway_embedding, _ = path2drug_out.max(dim=1)  # [B, gene_ffn_output_dim]
+        final_drug_embedding = drug2path_out                   # [B, drug_ffn_output_dim]
+        
         combined_embedding = torch.cat((final_pathway_embedding, final_drug_embedding), dim=-1)
 
-        x = F.relu(self.bn1(self.fc1(combined_embedding)))
-        x = F.relu(self.bn2(self.fc2(x)))
+        x = self.dropout(F.relu(self.bn1(self.fc1(combined_embedding))))
+        x = self.dropout(F.relu(self.bn2(self.fc2(x))))
         x = self.fc3(x)
-        
-        return x, gene2sub_weights, sub2gene_weights, final_pathway_embedding, final_drug_embedding
+
+        return x, path2drug_weights, drug2path_weights, gene_embedded_value, drug_embeddings, pathway_embeddings

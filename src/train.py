@@ -54,10 +54,13 @@ model_config = config['model']
 data_config = config['data']
 system_config = config['system']
 
+# --- 모델 파라미터 추출 수정 ---
+GENE_FFN_OUTPUT_DIM = model_config['gene_ffn_output_dim']
+DRUG_FFN_OUTPUT_DIM = model_config['drug_ffn_output_dim'] # ChemBERTa FFN 출력 차원
 MAX_GENE_SLOTS = model_config['max_gene_slots']
-MAX_DRUG_SUBSTRUCTURES = model_config['max_drug_substructures']
-GENE_LAYER_EMBEDDING_DIM = model_config['gene_layer_embedding_dim']
-SUBSTRUCTURE_LAYER_EMBEDDING_DIM = model_config['substructure_layer_embedding_dim']
+GENE_INPUT_DIM = model_config['gene_input_dim'] # Gene FFN 입력 차원
+DRUG_INPUT_DIM = model_config.get('drug_input_dim', 768) # ChemBERTa 입력 차원
+IS_DIFFER = model_config.get('isDiffer', True) # 차등 크로스 어텐션 사용 여부
 CROSS_ATTN_EMBEDDING_DIM = model_config['cross_attn_embedding_dim']
 FINAL_EMBEDDING_DIM = model_config['final_embedding_dim']
 OUTPUT_DIM = model_config['output_dim']
@@ -82,8 +85,9 @@ logging.basicConfig(
 
 logging.info(
     "Embedding Dimensions and Hidden Layers: "
-    f"  GENE_EMBEDDING_DIM: {GENE_LAYER_EMBEDDING_DIM} "
-    f"  SUBSTRUCTURE_EMBEDDING_DIM: {SUBSTRUCTURE_LAYER_EMBEDDING_DIM} "
+    f"  GENE_FFN_OUTPUT_DIM: {GENE_FFN_OUTPUT_DIM} "
+    f"  DRUG_FFN_OUTPUT_DIM: {DRUG_FFN_OUTPUT_DIM} "
+    f"  DRUG_INPUT_DIM: {DRUG_INPUT_DIM} "
     f"  FINAL_DIM: {FINAL_EMBEDDING_DIM} "
     f"  OUTPUT_DIM: {OUTPUT_DIM}")
 logging.info(
@@ -98,33 +102,36 @@ logging.info(f"CUDA is available: {torch.cuda.is_available()}")
 set_seed(system_config['seed'])
 
 # Common Data Load
-pathway_masks = torch.load(data_config['pathway_mask_path'])
-pathway_laplacian_embeddings = torch.load(data_config['pathway_laplacian_embeddings_path'])
+# Removed unused pathway_masks and pathway_laplacian_embeddings loading
+gene_10fb_embeddings = torch.load(data_config['gene_10fb_embeddings_path'])
+pathway_gene_indices = torch.load(data_config['pathway_gene_indices_path'])
 
 # Helper Function
+# train.py의 process_batch 함수
 def process_batch(batch_idx, batch, epoch, model, criterion, device, mode="train", is_best_epoch=False, save_weights=False, save_dir_root=None):
-    gene_embeddings = batch['gene_embeddings'].to(device) # [Batch, Pathway_num, Max_Gene]
-    drug_embeddings = batch['drug_embeddings'].to(device) # [Batch, Max_Sub]
-    drug_spectral_embeddings = batch['drug_spectral_embeddings'].to(device) # [Batch, Max_Sub]
-    drug_masks = batch['drug_masks'].to(device) # [Batch, Max_Sub]
-    labels = batch['labels'].to(device) # [Batch]
+    gene_embeddings = batch['gene_embeddings'].to(device)
+    drug_chembert_embeddings = batch['drug_chembert_embeddings'].to(device)  # ChemBERTa embeddings
+    labels = batch['labels'].to(device)
     sample_indices = batch['sample_indices']
 
-    outputs, gene2sub_weights, sub2gene_weights, final_pathway_embedding, final_drug_embedding = model(gene_embeddings, drug_embeddings, drug_spectral_embeddings, drug_masks)    
+    # --- 새로운 모델 반환값 ---
+    outputs, path2drug_weights, drug2path_weights, gene_embedded_value, drug_embeddings, pathway_embeddings = model(gene_embeddings, drug_chembert_embeddings)
     outputs = outputs.squeeze(dim=-1) 
     loss = criterion(outputs, labels) 
 
     rmse = torch.sqrt(loss).item()  
 
-    # Save weights
+    # --- Save weights 부분 수정 ---
     if mode == "train" and save_weights and save_config['isSave']:
         save_dir = f"{save_dir_root}/current_epoch"
         os.makedirs(save_dir, exist_ok=True)
-        torch.save(gene2sub_weights.detach().cpu(), f"{save_dir}/B{batch_idx}_gene2sub_weight.pt")
-        torch.save(sub2gene_weights.detach().cpu(), f"{save_dir}/B{batch_idx}_sub2gene_weight.pt")
-        # torch.save(final_pathway_embedding.detach().cpu(), f"{save_dir}/B{batch_idx}_pathway_embedding.pt")
-        # torch.save(final_drug_embedding.detach().cpu(), f"{save_dir}/B{batch_idx}_drug_embedding.pt")
-        torch.save(sample_indices, f"{save_dir}/B{batch_idx}_samples.pt") # (세포주, 약물)
+        torch.save(path2drug_weights.detach().cpu(), f"{save_dir}/B{batch_idx}_path2drug_weight.pt")
+        torch.save(drug2path_weights.detach().cpu(), f"{save_dir}/B{batch_idx}_drug2path_weight.pt")
+        
+        torch.save(gene_embedded_value.detach().cpu(), f"{save_dir}/B{batch_idx}_pathway_value_embed.pt")
+        torch.save(drug_embeddings.detach().cpu(), f"{save_dir}/B{batch_idx}_drug_embed.pt")
+        torch.save(pathway_embeddings.detach().cpu(), f"{save_dir}/B{batch_idx}_pathway_embed.pt")
+        torch.save(sample_indices, f"{save_dir}/B{batch_idx}_samples.pt")
 
     return outputs, loss, rmse, sample_indices, labels
 
@@ -142,23 +149,43 @@ for fold in range(1, 6):
     
     # Fold Data Load & Init Model
     fold_data = torch.load(f'{data_config["cross_validation_data_dir"]}/cross_valid_fold_{fold}.pt')
+    
+    # gene_embeddings를 10fb 데이터로 교체
+    fold_data['train']['gene_embeddings'] = gene_10fb_embeddings
+    fold_data['validation']['gene_embeddings'] = gene_10fb_embeddings
+    
     train_dataset = DrugResponseDataset(**fold_data['train'])
     val_dataset = DrugResponseDataset(**fold_data['validation'])
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn, num_workers=4, pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn, num_workers=4, pin_memory=True)
     
+        
     model = DrugResponseModel(
-        pathway_masks=pathway_masks,
-        pathway_laplacian_embeddings=pathway_laplacian_embeddings, 
-        gene_layer_dim=GENE_LAYER_EMBEDDING_DIM,
-        substructure_layer_dim=SUBSTRUCTURE_LAYER_EMBEDDING_DIM,
+        pathway_gene_indices=pathway_gene_indices,
+        gene_ffn_output_dim=GENE_FFN_OUTPUT_DIM,
+        drug_ffn_output_dim=DRUG_FFN_OUTPUT_DIM,
         cross_attn_dim=CROSS_ATTN_EMBEDDING_DIM,
         final_dim=FINAL_EMBEDDING_DIM,
-        max_gene_slots=MAX_GENE_SLOTS, 
-        max_drug_substructures=MAX_DRUG_SUBSTRUCTURES 
+        max_gene_slots=MAX_GENE_SLOTS,
+        gene_input_dim=GENE_INPUT_DIM,
+        drug_input_dim=DRUG_INPUT_DIM,
+        isDiffer=IS_DIFFER,
+        gene_ffn_hidden_dim=model_config['gene_ffn_hidden_dim'],
+        drug_ffn_hidden_dim=model_config['drug_ffn_hidden_dim'],
+        gene_ffn_dropout=model_config['gene_ffn_dropout'],
+        drug_ffn_dropout=model_config['drug_ffn_dropout'],
+        num_heads=model_config['num_heads'],
+        depth=model_config['depth'],
+        mlp_dropout=model_config['mlp_dropout'],
+        final_dim_reduction_factor=model_config['final_dim_reduction_factor']
     ).to(DEVICE)
+    
     criterion = nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=training_config['learning_rate'])
+    optimizer = optim.Adam(
+        model.parameters(), 
+        lr=training_config['learning_rate'], 
+        weight_decay=training_config.get('weight_decay', 0) # <-- weight_decay 추가
+    )
     
     # Training Loop
     train_rmses, val_rmses = [], []
@@ -200,7 +227,7 @@ for fold in range(1, 6):
         total_val_se, total_val_samples = 0, 0
 
         with torch.no_grad():
-            for val_idx, batch in tqdm(val_loader, desc=f"Validation Epoch {epoch+1}"):
+            for val_idx, batch in enumerate(tqdm(val_loader, desc=f"Validation Epoch {epoch+1}")):
                 outputs, loss, rmse, sample_indices, labels = process_batch(val_idx, batch, epoch+1, model, criterion, DEVICE, mode="val", is_best_epoch=False, save_weights=False)
                 se = ((outputs.detach() - labels.detach()) ** 2).sum()
                 total_val_se += se.item()
@@ -307,14 +334,22 @@ if os.path.exists(target_fold_weights_dir):
     
     # Recreate model and load weights
     model = DrugResponseModel(
-        pathway_masks=pathway_masks,
-        pathway_laplacian_embeddings=pathway_laplacian_embeddings, 
-        gene_layer_dim=GENE_LAYER_EMBEDDING_DIM,
-        substructure_layer_dim=SUBSTRUCTURE_LAYER_EMBEDDING_DIM,
+        pathway_gene_indices=pathway_gene_indices,
+        gene_ffn_output_dim=GENE_FFN_OUTPUT_DIM,
+        drug_ffn_output_dim=DRUG_FFN_OUTPUT_DIM,
         cross_attn_dim=CROSS_ATTN_EMBEDDING_DIM,
         final_dim=FINAL_EMBEDDING_DIM,
-        max_gene_slots=MAX_GENE_SLOTS, 
-        max_drug_substructures=MAX_DRUG_SUBSTRUCTURES 
+        max_gene_slots=MAX_GENE_SLOTS,
+        drug_input_dim=DRUG_INPUT_DIM,
+        isDiffer=IS_DIFFER,
+        gene_ffn_hidden_dim=model_config['gene_ffn_hidden_dim'],
+        drug_ffn_hidden_dim=model_config['drug_ffn_hidden_dim'],
+        gene_ffn_dropout=model_config['gene_ffn_dropout'],
+        drug_ffn_dropout=model_config['drug_ffn_dropout'],
+        num_heads=model_config['num_heads'],
+        depth=model_config['depth'],
+        mlp_dropout=model_config['mlp_dropout'],
+        final_dim_reduction_factor=model_config['final_dim_reduction_factor']
     ).to(DEVICE)
     model.load_state_dict(target_fold_checkpoint['model_state_dict'])
     
