@@ -1,0 +1,55 @@
+# Training Configuration
+training:
+  device: "cuda:1" 
+  batch_size: 128
+  learning_rate: 0.0001
+  num_epochs: 100
+  weight_decay: 0.001
+  early_stopping_patience: 100
+
+# Save Configuration
+save:
+  isSave: true
+  save_fold_number: 1
+
+# Model Architecture Parameters
+model:
+  # --- Cross-Attention Type ---
+  isDiffer: true # true for diff
+
+  # --- Multi-Token Drug Parameters ---
+  max_drug_sequence_length: 17 # Maximum sequence length(chemberta: 154, BRICS: 17)
+
+  # --- FFN Architecture Parameters ---
+  max_gene_slots: 218 # (고정) for 6&7
+  gene_input_dim: 10 # (고정)
+  drug_input_dim: 768 # (고정) ChemBERTa embedding dimension
+  gene_ffn_output_dim: 64 # Gene FFN 출력 차원
+  drug_ffn_output_dim: 64 # Drug FFN 출력 차원
+  gene_ffn_hidden_dim: 512
+  drug_ffn_hidden_dim: 512
+  gene_ffn_dropout: 0.5
+  drug_ffn_dropout: 0.5
+  
+  # --- Cross-Attention Parameters ---
+  cross_attn_embedding_dim: 64
+  num_heads: 4 
+  depth: 2
+  
+  # --- MLP Parameters ---
+  mlp_dropout: 0.3
+  final_embedding_dim: 512
+  final_dim_reduction_factor: 3
+  output_dim: 1 # (고정)
+
+# Data Paths
+data:
+  pathway_gene_indices_path: "./input/pathway_gene_indices.pt"
+  cross_validation_data_dir: "./dataset" 
+  test_data_path: "./dataset/test_dataset.pt"
+
+# System Settings
+system:
+  timezone: "Asia/Seoul"
+  seed: 42
+  pytorch_cuda_alloc_conf: "expandable_segments:True"
